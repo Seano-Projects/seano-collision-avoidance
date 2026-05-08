@@ -58,7 +58,7 @@ setup(
         (os.path.join("share", package_name, "config"), glob("config/*.yaml")),
         (os.path.join("share", package_name, "models"), _files_recursive("models")),
     ],
-    install_requires=["setuptools"],
+    install_requires=["setuptools", "numpy", "opencv-python", "ultralytics"],
     zip_safe=True,
     maintainer="seano",
     maintainer_email="seano@todo.todo",

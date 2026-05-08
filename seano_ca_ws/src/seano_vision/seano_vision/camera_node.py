@@ -61,8 +61,34 @@ class CameraSource(Node):
         self.resize_width = int(self.get_parameter("resize_width").value)
         self.resize_height = int(self.get_parameter("resize_height").value)
 
-        self.raw_topic = str(self.get_parameter("raw_topic").value)
-        self.raw_reliable_topic = str(self.get_parameter("raw_reliable_topic").value)
+        # Topic parameters are intentionally aliased.
+        # Older launch/YAML files use topic_best_effort/topic_reliable,
+        # while the newer node interface uses raw_topic/raw_reliable_topic.
+        # Non-empty legacy aliases take precedence so launch overrides work.
+        topic_best_effort = str(self.get_parameter("topic_best_effort").value).strip()
+        topic_reliable = str(self.get_parameter("topic_reliable").value).strip()
+        raw_topic = str(self.get_parameter("raw_topic").value).strip()
+        raw_reliable_topic = str(self.get_parameter("raw_reliable_topic").value).strip()
+
+        self.raw_topic = topic_best_effort or raw_topic or "/seano/camera/image_raw"
+        self.raw_reliable_topic = (
+            topic_reliable or raw_reliable_topic or "/seano/camera/image_raw_reliable"
+        )
+
+        self.publish_best_effort = bool(self.get_parameter("publish_best_effort").value)
+        self.publish_reliable = bool(self.get_parameter("publish_reliable").value)
+        if not self.publish_best_effort and not self.publish_reliable:
+            self.get_logger().warn(
+                "Both publish_best_effort and publish_reliable are false; "
+                "forcing reliable publisher on so the camera is not silent."
+            )
+            self.publish_reliable = True
+
+        self.reconnect_sec = max(0.05, float(self.get_parameter("reconnect_sec").value))
+        self.log_stats_sec = max(0.0, float(self.get_parameter("log_stats_sec").value))
+        self.output_encoding = str(self.get_parameter("output_encoding").value).strip() or "bgr8"
+        self.grab_skip = max(0, int(self.get_parameter("grab_skip").value))
+        self.rotate = int(self.get_parameter("rotate").value)
 
         if self.max_fps <= 0.0:
             self.max_fps = 4.0
@@ -85,8 +111,12 @@ class CameraSource(Node):
             durability=DurabilityPolicy.VOLATILE,
         )
 
-        self.pub_raw = self.create_publisher(Image, self.raw_topic, qos_profile_sensor_data)
-        self.pub_raw_reliable = self.create_publisher(Image, self.raw_reliable_topic, reliable_qos)
+        self.pub_raw = None
+        self.pub_raw_reliable = None
+        if self.publish_best_effort:
+            self.pub_raw = self.create_publisher(Image, self.raw_topic, qos_profile_sensor_data)
+        if self.publish_reliable:
+            self.pub_raw_reliable = self.create_publisher(Image, self.raw_reliable_topic, reliable_qos)
 
         self._open_capture(initial=True)
 
@@ -125,10 +155,23 @@ class CameraSource(Node):
         self.declare_parameter("raw_topic", "/seano/camera/image_raw", dyn)
         self.declare_parameter("raw_reliable_topic", "/seano/camera/image_raw_reliable", dyn)
 
+        # Legacy aliases used by the existing YAML and launch files.
+        self.declare_parameter("topic_best_effort", "", dyn)
+        self.declare_parameter("topic_reliable", "", dyn)
+        self.declare_parameter("publish_best_effort", True, dyn)
+        self.declare_parameter("publish_reliable", True, dyn)
+        self.declare_parameter("reconnect_sec", 0.5, dyn)
+        self.declare_parameter("log_stats_sec", 2.0, dyn)
+        self.declare_parameter("output_encoding", "bgr8", dyn)
+        self.declare_parameter("grab_skip", 0, dyn)
+        self.declare_parameter("rotate", 0, dyn)
+
         # Kept for launch compatibility with older files.
         self.declare_parameter("publish_in_reader", True, dyn)
         self.declare_parameter("rtsp_tcp", True, dyn)
         self.declare_parameter("gst_latency_ms", 80, dyn)
+        self.declare_parameter("gstreamer_latency_ms", 80, dyn)
+        self.declare_parameter("prefer_h264_pipeline", False, dyn)
 
     def _device_label(self) -> str:
         if self.device_path:
@@ -272,6 +315,13 @@ class CameraSource(Node):
         return False, None
 
     def _preprocess(self, frame):
+        if self.rotate == 90:
+            frame = cv2.rotate(frame, cv2.ROTATE_90_CLOCKWISE)
+        elif self.rotate == 180:
+            frame = cv2.rotate(frame, cv2.ROTATE_180)
+        elif self.rotate == 270:
+            frame = cv2.rotate(frame, cv2.ROTATE_90_COUNTERCLOCKWISE)
+
         if self.swap_rb:
             frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
 
@@ -290,26 +340,38 @@ class CameraSource(Node):
             self._maybe_log_stats(now)
             return
 
+        if self.grab_skip > 0 and self.cap is not None:
+            for _ in range(self.grab_skip):
+                try:
+                    self.cap.grab()
+                except Exception:
+                    break
+
         frame = self._preprocess(frame)
 
-        msg = self.bridge.cv2_to_imgmsg(frame, encoding="bgr8")
+        msg = self.bridge.cv2_to_imgmsg(frame, encoding=self.output_encoding)
         msg.header.stamp = self.get_clock().now().to_msg()
         msg.header.frame_id = self.frame_id
 
-        self.pub_raw.publish(msg)
-        self.pub_raw_reliable.publish(msg)
+        published = 0
+        if self.pub_raw is not None:
+            self.pub_raw.publish(msg)
+            published += 1
+        if self.pub_raw_reliable is not None:
+            self.pub_raw_reliable.publish(msg)
+            published += 1
 
         self.last_frame_wall = now
         self.total_read_count += 1
-        self.total_pub_count += 1
+        self.total_pub_count += published
         self.stats_read_count += 1
-        self.stats_pub_count += 1
+        self.stats_pub_count += published
 
         self._maybe_log_stats(now)
 
     def _maybe_log_stats(self, now: float) -> None:
         dt = now - self.last_stats_wall
-        if dt < 2.0:
+        if self.log_stats_sec <= 0.0 or dt < self.log_stats_sec:
             return
 
         pub_fps = self.stats_pub_count / dt if dt > 0.0 else 0.0
@@ -322,7 +384,7 @@ class CameraSource(Node):
             "stats | "
             f"source={self.source} input={src_label} "
             f"cap_fps={cap_fps:.1f} pub_fps={pub_fps:.1f} "
-            f"age={age_ms:.0f}ms enc=bgr8 max_fps={self.max_fps:.1f} "
+            f"age={age_ms:.0f}ms enc={self.output_encoding} max_fps={self.max_fps:.1f} "
             f"loops={self.loop_count}"
         )
 

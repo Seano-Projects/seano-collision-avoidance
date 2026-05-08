@@ -1,0 +1,5 @@
+# Python dependencies for SEANO perception nodes.
+# Install torch separately on Jetson using the wheel matching your JetPack/CUDA version.
+numpy
+opencv-python
+ultralytics

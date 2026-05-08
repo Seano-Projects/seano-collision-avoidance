@@ -366,6 +366,13 @@ class MissionModeManager(Node):
         if failsafe_on:
             return "FAILSAFE"
 
+        # RC override is the strongest real actuator-takeover evidence.
+        # Do not depend only on /ca/avoid_active here; that topic is a decision
+        # signal, while rc_override_enable means the hardware output path is active.
+        if override_on:
+            self.st.confirmed_avoid_session = True
+            return "AVOID"
+
         now = float(self.get_clock().now().nanoseconds) * 1.0e-9
 
         avoid_active = bool(getattr(self.st, "avoid_active_decision", False))
@@ -519,6 +526,7 @@ class MissionModeManager(Node):
             mode == avoid_target
             and avoid_related
             and not bool(getattr(self.st, "avoid_active_decision", False))
+            and not bool(getattr(self.st, "last_override", False))
         ):
             self._emit_event(
                 "MODE_REQ_SKIPPED",

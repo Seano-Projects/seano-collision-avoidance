@@ -362,7 +362,7 @@ def generate_launch_description():
             "use_ca_viewer": ca_use_ca_viewer,
             "use_wl_viewer": ca_use_wl_viewer,
             "camera_launch": ca_camera_launch,
-            "image_topic": "/camera/image_annotated",
+            "image_topic": ca_image_topic,
             "annotated_topic": ca_annotated_topic,
             "detections_raw_topic": ca_detections_raw_topic,
             "detections_filtered_topic": ca_detections_filtered_topic,
@@ -547,7 +547,7 @@ def generate_launch_description():
             {
                 "log_root": event_log_root,
                 "run_id": event_run_id,
-                "image_topic": "/camera/image_annotated",
+                "image_topic": ca_annotated_topic,
                 "avoid_state_topic": "/ca/mode_manager_state",
                 "ca_mode_topic": "/ca/mode",
                 "mode_event_topic": "/ca/mode_manager_event",

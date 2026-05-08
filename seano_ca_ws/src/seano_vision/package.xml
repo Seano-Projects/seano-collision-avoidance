@@ -33,6 +33,7 @@
   <!-- Python runtime deps (system packages) -->
   <exec_depend>python3-numpy</exec_depend>
   <exec_depend>python3-opencv</exec_depend>
+  <exec_depend>python3-pip</exec_depend>
 
   <!-- Tests / lint -->
   <test_depend>ament_copyright</test_depend>

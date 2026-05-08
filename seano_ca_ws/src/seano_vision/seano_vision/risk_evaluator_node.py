@@ -1045,14 +1045,20 @@ class RiskEvaluatorNode(Node):
         self.pub_risk.publish(Float32(data=float(overall_risk)))
         self.pub_cmd.publish(String(data=str(cmd)))
         self.pub_mode.publish(String(data=str(self.mode)))
-        self.pub_avoid_active.publish(
-            Bool(
-                data=self._govern_avoid_active(
-                    bool(self._seano_final_avoid_active(locals())),
-                    float(getattr(self, "_last_published_risk", 0.0)),
-                )
-            )
+        raw_avoid_active = self._compute_final_avoid_active(
+            cmd=str(cmd),
+            risk=float(overall_risk),
+            top=top,
+            metrics=metrics,
+            geom_ready=geom_ready,
         )
+        governed_avoid_active = self._govern_avoid_active(
+            bool(raw_avoid_active),
+            float(getattr(self, "_last_published_risk", 0.0)),
+        )
+        metrics["avoid_active_raw"] = bool(raw_avoid_active)
+        metrics["avoid_active"] = bool(governed_avoid_active)
+        self.pub_avoid_active.publish(Bool(data=bool(governed_avoid_active)))
 
         vq = float(metrics.get("vision_quality", 1.0))
         self.pub_vq.publish(Float32(data=float(vq)))
@@ -2265,6 +2271,55 @@ class RiskEvaluatorNode(Node):
             self.pub_dbg.publish(out)
         except Exception:
             return
+
+    def _compute_final_avoid_active(
+        self,
+        cmd: str,
+        risk: float,
+        top: Optional[Track],
+        metrics: dict,
+        geom_ready: bool,
+    ) -> bool:
+        """Deterministic authority signal for /ca/avoid_active.
+
+        This is intentionally not inferred from locals() or free-form strings.
+        The signal is true only when the evaluator has a valid target/geometry
+        and is intentionally issuing or maintaining an avoidance maneuver.
+        """
+        cmd_hold = str(self.get_parameter("cmd_hold").value)
+        mode = str(getattr(self, "mode", "NORMAL")).upper()
+        gate = str(metrics.get("decision_gate", "")).upper()
+        reason_codes = [str(x).upper() for x in metrics.get("reason_codes", [])]
+
+        if not bool(geom_ready):
+            return False
+        if mode in ("LOST_PERCEPTION", "STARTUP_WAIT_IMAGE"):
+            return False
+        if "LOST_PERCEPTION" in reason_codes or "WAIT_IMAGE_GEOMETRY" in reason_codes:
+            return False
+        if top is None:
+            return False
+        if "NO_TARGET" in reason_codes or "TARGET_LOST" in reason_codes:
+            return False
+
+        try:
+            risk_v = max(0.0, min(1.0, float(risk)))
+        except Exception:
+            risk_v = 0.0
+
+        enter_risk = float(self.get_parameter("avoid_active_enter_risk").value)
+        exit_risk = float(self.get_parameter("avoid_active_exit_risk").value)
+        evaluator_avoid_mode = bool(getattr(self, "avoid_mode", False))
+        maneuver_cmd = str(cmd).strip().upper() != str(cmd_hold).strip().upper()
+        explicit_gate = gate in ("ENTER_AVOID", "HOLD_AVOID")
+
+        if explicit_gate and risk_v >= exit_risk:
+            return True
+        if evaluator_avoid_mode and risk_v >= exit_risk:
+            return True
+        if maneuver_cmd and risk_v >= min(enter_risk, 0.35):
+            return True
+        return False
 
     # SEANO_FINAL_AVOID_ACTIVE_GATE_V5
     def _seano_final_avoid_active(self, ctx=None) -> bool:

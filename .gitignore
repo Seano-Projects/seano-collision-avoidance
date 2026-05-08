@@ -23,9 +23,31 @@ seano_ca_ws/test_media/
 seano_ca_ws/bags/
 seano_event_logs/
 
-# Non-hardware demo/test launch files
-seano_ca_ws/src/seano_vision/launch/demo_full_ca.launch.py
-seano_ca_ws/src/seano_vision/launch/phase2_camera_source_test.launch.py
+# Keep active launch files tracked. Put private scratch launches under scratch/ instead.
+scratch/
 
 # Non-hardware baseline config
 seano_ca_ws/src/seano_vision/config/alfin7_baseline.yaml
+
+# ROS 2 build/runtime artifacts
+build/
+install/
+log/
+logs/
+
+# Python cache
+__pycache__/
+*.pyc
+
+# ROS bag / telemetry / runtime logs
+*.bag
+*.db3
+*.mcap
+*.tlog
+*.ulg
+*.bin
+*.raw
+
+# temporary outputs
+output.ts
+way.txt
