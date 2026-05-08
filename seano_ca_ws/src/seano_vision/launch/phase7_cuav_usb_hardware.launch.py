@@ -570,11 +570,9 @@ def generate_launch_description():
                 "left_cmd_topic": "/seano/left_cmd",
                 "right_cmd_topic": "/seano/right_cmd",
                 "limiter_reason_topic": "/seano/limiter_reason",
-                "rc_override_topic": "/mavros/rc/override",
+                "mavros_rc_override_topic": "/mavros/rc/override",
                 "frame_max_age_s": ParameterValue(event_frame_max_age_s, value_type=float),
                 "save_frames": True,
-                "float_epsilon": 0.02,
-                "min_event_interval_s": 0.05,
             }
         ],
     )

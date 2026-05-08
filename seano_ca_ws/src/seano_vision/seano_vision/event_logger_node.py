@@ -54,7 +54,11 @@ EVENT_FIELDS = [
     "trigger",
     "value",
     "avoid_state",
+    "ca_mode",
+    "command_raw",
     "command_safe",
+    "failsafe_active",
+    "auto_master_enable",
     "risk",
     "mode_event",
     "mavros_connected",
@@ -63,10 +67,13 @@ EVENT_FIELDS = [
     "rc_override_enable",
     "left_cmd",
     "right_cmd",
+    "manual_left_cmd",
+    "manual_right_cmd",
     "selected_left_cmd",
     "selected_right_cmd",
     "auto_left_cmd",
     "auto_right_cmd",
+    "limiter_reason",
     "image_topic",
     "image_saved",
     "image_path",
@@ -116,7 +123,11 @@ TS_FIELDS = [
     "wall_time_iso",
     "ros_time_sec",
     "avoid_state",
+    "ca_mode",
+    "command_raw",
     "command_safe",
+    "failsafe_active",
+    "auto_master_enable",
     "risk",
     "mode_event",
     "mavros_connected",
@@ -125,10 +136,13 @@ TS_FIELDS = [
     "rc_override_enable",
     "left_cmd",
     "right_cmd",
+    "manual_left_cmd",
+    "manual_right_cmd",
     "selected_left_cmd",
     "selected_right_cmd",
     "auto_left_cmd",
     "auto_right_cmd",
+    "limiter_reason",
 ]
 
 
@@ -229,6 +243,7 @@ class EventLoggerNode(Node):
 
         self.image_topic = str(self.get_parameter("image_topic").value)
         self.frame_max_age_s = float(self.get_parameter("frame_max_age_s").value)
+        self.save_frames = bool(self.get_parameter("save_frames").value)
         self.capture_delay_s = float(self.get_parameter("capture_delay_s").value)
         self.jpeg_quality = max(1, min(100, int(self.get_parameter("jpeg_quality").value)))
         self.risk_enter_threshold = float(self.get_parameter("risk_enter_threshold").value)
@@ -254,7 +269,11 @@ class EventLoggerNode(Node):
 
         self.state: Dict[str, Any] = {
             "avoid_state": "UNKNOWN",
+            "ca_mode": "UNKNOWN",
+            "command_raw": "UNKNOWN",
             "command_safe": "UNKNOWN",
+            "failsafe_active": None,
+            "auto_master_enable": None,
             "risk": None,
             "mode_event": "",
             "mavros_connected": None,
@@ -263,14 +282,22 @@ class EventLoggerNode(Node):
             "rc_override_enable": None,
             "left_cmd": None,
             "right_cmd": None,
+            "manual_left_cmd": None,
+            "manual_right_cmd": None,
             "selected_left_cmd": None,
             "selected_right_cmd": None,
             "auto_left_cmd": None,
             "auto_right_cmd": None,
+            "limiter_reason": "",
         }
 
         self.last_logged_avoid_state: Optional[str] = None
+        self.last_logged_ca_mode: Optional[str] = None
+        self.last_logged_command_raw: Optional[str] = None
         self.last_logged_command_safe: Optional[str] = None
+        self.last_logged_failsafe_active: Optional[bool] = None
+        self.last_logged_auto_master_enable: Optional[bool] = None
+        self.last_logged_limiter_reason: Optional[str] = None
         self.last_command_safe: Optional[str] = None
         self.last_risk_value: Optional[float] = None
         self.last_risk_time: Optional[float] = None
@@ -297,20 +324,28 @@ class EventLoggerNode(Node):
         self.declare_parameter("run_id", "")
         self.declare_parameter("image_topic", "/ca/debug_image")
         self.declare_parameter("avoid_state_topic", "/ca/mode_manager_state")
+        self.declare_parameter("ca_mode_topic", "/ca/mode")
+        self.declare_parameter("command_raw_topic", "/ca/command")
         self.declare_parameter("command_safe_topic", "/ca/command_safe")
+        self.declare_parameter("failsafe_active_topic", "/ca/failsafe_active")
         self.declare_parameter("risk_topic", "/ca/risk")
         self.declare_parameter("mode_event_topic", "/ca/mode_manager_event")
+        self.declare_parameter("auto_master_enable_topic", "/seano/auto_master_enable")
         self.declare_parameter("auto_enable_topic", "/seano/auto_enable")
         self.declare_parameter("rc_override_enable_topic", "/seano/rc_override_enable")
         self.declare_parameter("left_cmd_topic", "/seano/left_cmd")
         self.declare_parameter("right_cmd_topic", "/seano/right_cmd")
+        self.declare_parameter("manual_left_cmd_topic", "/seano/manual/left_cmd")
+        self.declare_parameter("manual_right_cmd_topic", "/seano/manual/right_cmd")
         self.declare_parameter("selected_left_cmd_topic", "/seano/selected/left_cmd")
         self.declare_parameter("selected_right_cmd_topic", "/seano/selected/right_cmd")
         self.declare_parameter("auto_left_cmd_topic", "/seano/auto/left_cmd")
         self.declare_parameter("auto_right_cmd_topic", "/seano/auto/right_cmd")
+        self.declare_parameter("limiter_reason_topic", "/seano/limiter_reason")
         self.declare_parameter("mavros_state_topic", "/mavros/state")
         self.declare_parameter("mavros_rc_override_topic", "/mavros/rc/override")
         self.declare_parameter("frame_max_age_s", 10.0)
+        self.declare_parameter("save_frames", True)
         self.declare_parameter("capture_delay_s", 0.35)
         self.declare_parameter("jpeg_quality", 92)
         self.declare_parameter("risk_enter_threshold", 0.20)
@@ -353,13 +388,28 @@ class EventLoggerNode(Node):
             String, str(self.get_parameter("avoid_state_topic").value), self.on_avoid_state, q
         )
         self.create_subscription(
+            String, str(self.get_parameter("ca_mode_topic").value), self.on_ca_mode, q
+        )
+        self.create_subscription(
+            String, str(self.get_parameter("command_raw_topic").value), self.on_command_raw, q
+        )
+        self.create_subscription(
             String, str(self.get_parameter("command_safe_topic").value), self.on_command_safe, q
+        )
+        self.create_subscription(
+            Bool, str(self.get_parameter("failsafe_active_topic").value), self.on_failsafe_active, q
         )
         self.create_subscription(
             Float32, str(self.get_parameter("risk_topic").value), self.on_risk, q
         )
         self.create_subscription(
             String, str(self.get_parameter("mode_event_topic").value), self.on_mode_event, q
+        )
+        self.create_subscription(
+            Bool,
+            str(self.get_parameter("auto_master_enable_topic").value),
+            self.on_auto_master_enable,
+            q,
         )
         self.create_subscription(
             Bool, str(self.get_parameter("auto_enable_topic").value), self.on_auto_enable, q
@@ -384,6 +434,18 @@ class EventLoggerNode(Node):
         )
         self.create_subscription(
             Float32,
+            str(self.get_parameter("manual_left_cmd_topic").value),
+            lambda m: self.update_float("manual_left_cmd", m.data),
+            q,
+        )
+        self.create_subscription(
+            Float32,
+            str(self.get_parameter("manual_right_cmd_topic").value),
+            lambda m: self.update_float("manual_right_cmd", m.data),
+            q,
+        )
+        self.create_subscription(
+            Float32,
             str(self.get_parameter("selected_left_cmd_topic").value),
             lambda m: self.update_float("selected_left_cmd", m.data),
             q,
@@ -404,6 +466,12 @@ class EventLoggerNode(Node):
             Float32,
             str(self.get_parameter("auto_right_cmd_topic").value),
             lambda m: self.update_float("auto_right_cmd", m.data),
+            q,
+        )
+        self.create_subscription(
+            String,
+            str(self.get_parameter("limiter_reason_topic").value),
+            self.on_limiter_reason,
             q,
         )
         if HAS_MAVROS and MavrosState is not None:
@@ -438,9 +506,64 @@ class EventLoggerNode(Node):
         with self.lock:
             self.state["mode_event"] = str(msg.data)
 
+    def on_ca_mode(self, msg: String) -> None:
+        value = str(msg.data).strip() or "UNKNOWN"
+        do_log = False
+        with self.lock:
+            self.state["ca_mode"] = value
+            if self.last_logged_ca_mode != value:
+                self.last_logged_ca_mode = value
+                do_log = True
+        if do_log:
+            self.queue_event("ca_mode", value)
+
+    def on_command_raw(self, msg: String) -> None:
+        value = str(msg.data).strip() or "UNKNOWN"
+        do_log = False
+        with self.lock:
+            self.state["command_raw"] = value
+            if self.last_logged_command_raw != value:
+                self.last_logged_command_raw = value
+                do_log = True
+        if do_log:
+            self.queue_event("command_raw", value)
+
+    def on_failsafe_active(self, msg: Bool) -> None:
+        value = bool(msg.data)
+        do_log = False
+        with self.lock:
+            self.state["failsafe_active"] = value
+            if self.last_logged_failsafe_active is None or self.last_logged_failsafe_active != value:
+                self.last_logged_failsafe_active = value
+                do_log = True
+        if do_log:
+            self.queue_event("failsafe_active", fmt_bool(value))
+
+    def on_auto_master_enable(self, msg: Bool) -> None:
+        value = bool(msg.data)
+        do_log = False
+        with self.lock:
+            self.state["auto_master_enable"] = value
+            if self.last_logged_auto_master_enable is None or self.last_logged_auto_master_enable != value:
+                self.last_logged_auto_master_enable = value
+                do_log = True
+        if do_log:
+            self.queue_event("auto_master_enable", fmt_bool(value))
+
     def on_auto_enable(self, msg: Bool) -> None:
         with self.lock:
             self.state["auto_enable"] = bool(msg.data)
+
+    def on_limiter_reason(self, msg: String) -> None:
+        value = str(msg.data).strip()
+        do_log = False
+        with self.lock:
+            self.state["limiter_reason"] = value
+            if self.last_logged_limiter_reason != value:
+                self.last_logged_limiter_reason = value
+                do_log = True
+        if do_log and value:
+            self.queue_event("limiter_reason", value)
 
     def on_mavros_state(self, msg: Any) -> None:
         with self.lock:
@@ -789,6 +912,14 @@ class EventLoggerNode(Node):
             )
 
     def save_hud_frame(self, ev: PendingEvent) -> Dict[str, str]:
+        if not self.save_frames:
+            return {
+                "image_saved": "false",
+                "image_path": "",
+                "image_age_s": "",
+                "image_stamp_sec": "",
+                "notes": "frame_saving_disabled",
+            }
         img = self.snapshot_image()
         if img.msg is None:
             return {
@@ -841,7 +972,11 @@ class EventLoggerNode(Node):
             "trigger": ev.trigger,
             "value": ev.value,
             "avoid_state": str(s.get("avoid_state", "")),
+            "ca_mode": str(s.get("ca_mode", "")),
+            "command_raw": str(s.get("command_raw", "")),
             "command_safe": str(s.get("command_safe", "")),
+            "failsafe_active": fmt_bool(s.get("failsafe_active")),
+            "auto_master_enable": fmt_bool(s.get("auto_master_enable")),
             "risk": fmt_float(s.get("risk"), 4),
             "mode_event": str(s.get("mode_event", "")),
             "mavros_connected": fmt_bool(s.get("mavros_connected")),
@@ -850,10 +985,13 @@ class EventLoggerNode(Node):
             "rc_override_enable": fmt_bool(s.get("rc_override_enable")),
             "left_cmd": fmt_float(s.get("left_cmd"), 4),
             "right_cmd": fmt_float(s.get("right_cmd"), 4),
+            "manual_left_cmd": fmt_float(s.get("manual_left_cmd"), 4),
+            "manual_right_cmd": fmt_float(s.get("manual_right_cmd"), 4),
             "selected_left_cmd": fmt_float(s.get("selected_left_cmd"), 4),
             "selected_right_cmd": fmt_float(s.get("selected_right_cmd"), 4),
             "auto_left_cmd": fmt_float(s.get("auto_left_cmd"), 4),
             "auto_right_cmd": fmt_float(s.get("auto_right_cmd"), 4),
+            "limiter_reason": str(s.get("limiter_reason", "")),
             "image_topic": self.image_topic,
             **info,
         }
@@ -872,7 +1010,7 @@ class EventLoggerNode(Node):
             if self.current_cycle is not None:
                 if info["image_saved"] == "true":
                     self.current_cycle["frame_events_saved"] += 1
-                else:
+                elif info.get("notes") != "frame_saving_disabled":
                     self.current_cycle["frame_events_failed"] += 1
         self.get_logger().info(
             f"event | {ev.event_id} | {ev.trigger}={ev.value} state={row['avoid_state']} "
@@ -885,7 +1023,11 @@ class EventLoggerNode(Node):
             "wall_time_iso": now_iso(),
             "ros_time_sec": f"{self.ros_time_sec():.6f}",
             "avoid_state": str(s.get("avoid_state", "")),
+            "ca_mode": str(s.get("ca_mode", "")),
+            "command_raw": str(s.get("command_raw", "")),
             "command_safe": str(s.get("command_safe", "")),
+            "failsafe_active": fmt_bool(s.get("failsafe_active")),
+            "auto_master_enable": fmt_bool(s.get("auto_master_enable")),
             "risk": fmt_float(s.get("risk"), 4),
             "mode_event": str(s.get("mode_event", "")),
             "mavros_connected": fmt_bool(s.get("mavros_connected")),
@@ -894,10 +1036,13 @@ class EventLoggerNode(Node):
             "rc_override_enable": fmt_bool(s.get("rc_override_enable")),
             "left_cmd": fmt_float(s.get("left_cmd"), 4),
             "right_cmd": fmt_float(s.get("right_cmd"), 4),
+            "manual_left_cmd": fmt_float(s.get("manual_left_cmd"), 4),
+            "manual_right_cmd": fmt_float(s.get("manual_right_cmd"), 4),
             "selected_left_cmd": fmt_float(s.get("selected_left_cmd"), 4),
             "selected_right_cmd": fmt_float(s.get("selected_right_cmd"), 4),
             "auto_left_cmd": fmt_float(s.get("auto_left_cmd"), 4),
             "auto_right_cmd": fmt_float(s.get("auto_right_cmd"), 4),
+            "limiter_reason": str(s.get("limiter_reason", "")),
         }
         with open(self.timeseries_csv, "a", newline="", encoding="utf-8") as f:
             csv.DictWriter(f, fieldnames=TS_FIELDS).writerow(row)
