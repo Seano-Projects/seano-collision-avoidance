@@ -1,36 +1,39 @@
 #!/usr/bin/env bash
-set -u
+set -eo pipefail
 
-# Safe release helper for the phase7 hardware path.
-# This script only publishes disable/release/zero commands; it does not start
-# MAVROS, launch files, or any autonomous behavior.
+: "${ROS_DOMAIN_ID:=42}"
+: "${COLCON_TRACE:=}"
+: "${AMENT_TRACE_SETUP_FILES:=}"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 WS_DIR="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 
-if [ -f "${WS_DIR}/install/setup.bash" ]; then
-  # shellcheck disable=SC1091
-  source "${WS_DIR}/install/setup.bash"
-fi
+set +u
+source /opt/ros/humble/setup.bash
+source "${WS_DIR}/install/setup.bash"
+set -u
 
-publish_once() {
-  ros2 topic pub --once "$@" >/dev/null 2>&1 || true
+pub_safe() {
+  local topic="$1"
+  local type="$2"
+  local msg="$3"
+  echo "[STOP] ${topic} <- ${msg}"
+  timeout 2s ros2 topic pub -w 0 --once "${topic}" "${type}" "${msg}" >/dev/null 2>&1 || true
 }
 
-publish_once /seano/auto_master_enable std_msgs/msg/Bool "{data: false}"
-publish_once /seano/auto_enable std_msgs/msg/Bool "{data: false}"
-publish_once /seano/rc_override_enable std_msgs/msg/Bool "{data: false}"
+echo "[STOP] Publishing SEANO Phase 7 safe-release commands on ROS_DOMAIN_ID=${ROS_DOMAIN_ID}"
 
-publish_once /seano/manual/left_cmd std_msgs/msg/Float32 "{data: 0.0}"
-publish_once /seano/manual/right_cmd std_msgs/msg/Float32 "{data: 0.0}"
-publish_once /seano/auto/left_cmd std_msgs/msg/Float32 "{data: 0.0}"
-publish_once /seano/auto/right_cmd std_msgs/msg/Float32 "{data: 0.0}"
-publish_once /seano/selected/left_cmd std_msgs/msg/Float32 "{data: 0.0}"
-publish_once /seano/selected/right_cmd std_msgs/msg/Float32 "{data: 0.0}"
-publish_once /seano/left_cmd std_msgs/msg/Float32 "{data: 0.0}"
-publish_once /seano/right_cmd std_msgs/msg/Float32 "{data: 0.0}"
+pub_safe /seano/auto_master_enable std_msgs/msg/Bool "{data: false}"
+pub_safe /seano/auto_enable std_msgs/msg/Bool "{data: false}"
+pub_safe /seano/rc_override_enable std_msgs/msg/Bool "{data: false}"
 
-publish_once /mavros/rc/override mavros_msgs/msg/OverrideRCIn \
-  "{channels: [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]}"
+pub_safe /seano/auto/left_cmd std_msgs/msg/Float32 "{data: 0.0}"
+pub_safe /seano/auto/right_cmd std_msgs/msg/Float32 "{data: 0.0}"
+pub_safe /seano/selected/left_cmd std_msgs/msg/Float32 "{data: 0.0}"
+pub_safe /seano/selected/right_cmd std_msgs/msg/Float32 "{data: 0.0}"
+pub_safe /seano/left_cmd std_msgs/msg/Float32 "{data: 0.0}"
+pub_safe /seano/right_cmd std_msgs/msg/Float32 "{data: 0.0}"
 
-echo "Phase7 safe release commands published."
+pub_safe /mavros/rc/override mavros_msgs/msg/OverrideRCIn "{channels: [0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0]}"
+
+echo "[STOP] Done."
