@@ -228,6 +228,11 @@ def generate_launch_description():
     # ------------------------------------------------------------------
     input_mode = LaunchConfiguration("input_mode")
     output_mode = LaunchConfiguration("output_mode")
+    actuator_interface = LaunchConfiguration("actuator_interface")
+    actuator_interface_supported = LaunchConfiguration("actuator_interface_supported")
+    actuator_interface_confirmed = LaunchConfiguration("actuator_interface_confirmed")
+    interface_supported_topic = LaunchConfiguration("interface_supported_topic")
+    interface_status_topic = LaunchConfiguration("interface_status_topic")
 
     rc_left_chan = LaunchConfiguration("rc_left_chan")
     rc_right_chan = LaunchConfiguration("rc_right_chan")
@@ -457,6 +462,15 @@ def generate_launch_description():
             {
                 "input_mode": input_mode,
                 "output_mode": output_mode,
+                "actuator_interface": actuator_interface,
+                "actuator_interface_supported": ParameterValue(
+                    actuator_interface_supported, value_type=bool
+                ),
+                "actuator_interface_confirmed": ParameterValue(
+                    actuator_interface_confirmed, value_type=bool
+                ),
+                "interface_supported_topic": interface_supported_topic,
+                "interface_status_topic": interface_status_topic,
                 "left_topic": "/seano/left_cmd",
                 "right_topic": "/seano/right_cmd",
                 "out_topic": "/mavros/rc/override",
@@ -603,6 +617,8 @@ def generate_launch_description():
         "/seano/auto_master_enable",
         "/seano/auto_enable",
         "/seano/rc_override_enable",
+        "/seano/fcu_actuator_interface_supported",
+        "/seano/fcu_actuator_interface_status",
         "/seano/manual/left_cmd",
         "/seano/manual/right_cmd",
         "/seano/auto/left_cmd",
@@ -808,6 +824,17 @@ def generate_launch_description():
         # bridge / output
         DeclareLaunchArgument("input_mode", default_value="left_right"),
         DeclareLaunchArgument("output_mode", default_value="rc_left_right"),
+        DeclareLaunchArgument("actuator_interface", default_value="rc_override"),
+        DeclareLaunchArgument("actuator_interface_supported", default_value="false"),
+        DeclareLaunchArgument("actuator_interface_confirmed", default_value="false"),
+        DeclareLaunchArgument(
+            "interface_supported_topic",
+            default_value="/seano/fcu_actuator_interface_supported",
+        ),
+        DeclareLaunchArgument(
+            "interface_status_topic",
+            default_value="/seano/fcu_actuator_interface_status",
+        ),
         DeclareLaunchArgument("rc_left_chan", default_value="1"),
         DeclareLaunchArgument("rc_right_chan", default_value="3"),
         DeclareLaunchArgument("rc_steer_chan", default_value="1"),

@@ -379,6 +379,24 @@ class MissionModeManager(Node):
         if cur_mode == _norm_mode(target):
             return
 
+        if self._manual_authority_guard_active(
+            mgr_state=mgr_state,
+            target=target,
+            cur_mode=cur_mode,
+            override_on=override_on,
+            failsafe_on=failsafe_on,
+        ):
+            self._emit_event(
+                "MODE_REQ_SKIPPED",
+                {
+                    "mode": _norm_mode(target),
+                    "cause": "enforce_mission",
+                    "reason": "manual_authority_guard",
+                    "current": cur_mode,
+                },
+            )
+            return
+
         self._emit_event(
             "ENFORCE",
             {"mgr_state": mgr_state, "target": target, "current": cur_mode},
@@ -538,6 +556,30 @@ class MissionModeManager(Node):
         if cur and cur not in ("MANUAL", "STABILIZE"):
             return cur
         return mission_default
+
+    def _manual_authority_guard_active(
+        self,
+        mgr_state: str,
+        target: str,
+        cur_mode: str,
+        override_on: bool,
+        failsafe_on: bool,
+    ) -> bool:
+        if mgr_state != "MISSION":
+            return False
+        if cur_mode not in ("MANUAL", "STABILIZE"):
+            return False
+        if _norm_mode(target) != "AUTO":
+            return False
+        if override_on or failsafe_on:
+            return False
+        if bool(getattr(self.st, "avoid_active_decision", False)):
+            return False
+        if bool(getattr(self.st, "rejoin_active", False)):
+            return False
+        if bool(getattr(self.st, "confirmed_avoid_session", False)):
+            return False
+        return True
 
     def _request_mode(self, mode: str, cause: str) -> None:
         mode = _norm_mode(mode)

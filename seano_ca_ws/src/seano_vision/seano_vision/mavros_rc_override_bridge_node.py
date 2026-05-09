@@ -37,7 +37,7 @@ from mavros_msgs.msg import OverrideRCIn
 import rclpy
 from rclpy.node import Node
 from rclpy.qos import DurabilityPolicy, HistoryPolicy, QoSProfile, ReliabilityPolicy
-from std_msgs.msg import Bool, Float32
+from std_msgs.msg import Bool, Float32, String
 
 
 def clampf(x: float, lo: float, hi: float) -> float:
@@ -63,6 +63,8 @@ class MavrosRcOverrideBridge(Node):
         self.declare_parameter("right_topic", "/seano/right_cmd")
         self.declare_parameter("cmd_vel_topic", "/cmd_vel")
         self.declare_parameter("out_topic", "/mavros/rc/override")
+        self.declare_parameter("interface_supported_topic", "/seano/fcu_actuator_interface_supported")
+        self.declare_parameter("interface_status_topic", "/seano/fcu_actuator_interface_status")
 
         # ========= NEW: override enable =========
         self.declare_parameter("override_enable_topic", "/seano/rc_override_enable")
@@ -72,6 +74,9 @@ class MavrosRcOverrideBridge(Node):
         # ========= Mode =========
         self.declare_parameter("input_mode", "thr_steer")  # thr_steer | left_right | twist
         self.declare_parameter("output_mode", "rc_thr_steer")  # rc_thr_steer | rc_left_right
+        self.declare_parameter("actuator_interface", "rc_override")
+        self.declare_parameter("actuator_interface_supported", False)
+        self.declare_parameter("actuator_interface_confirmed", False)
 
         # ========= RC channel mapping (1-based) =========
         # output_mode = rc_thr_steer:
@@ -149,6 +154,8 @@ class MavrosRcOverrideBridge(Node):
         right_topic = str(self.get_parameter("right_topic").value)
         cmd_vel_topic = str(self.get_parameter("cmd_vel_topic").value)
         out_topic = str(self.get_parameter("out_topic").value)
+        interface_supported_topic = str(self.get_parameter("interface_supported_topic").value)
+        interface_status_topic = str(self.get_parameter("interface_status_topic").value)
 
         self._thr_cmd: float = 0.0
         self._steer_cmd: float = 0.0
@@ -158,6 +165,7 @@ class MavrosRcOverrideBridge(Node):
 
         self._last_cmd_time = self.get_clock().now()
         self._last_log_time = self.get_clock().now()
+        self._last_interface_log_time = self.get_clock().now()
 
         self._last_pwm_steer = int(self.get_parameter("pwm_neutral").value)
         self._last_pwm_thr = int(self.get_parameter("pwm_neutral").value)
@@ -177,6 +185,16 @@ class MavrosRcOverrideBridge(Node):
         self.create_subscription(Twist, cmd_vel_topic, self._on_twist, qos)
 
         self.pub = self.create_publisher(OverrideRCIn, out_topic, qos)
+        self.interface_supported_pub = self.create_publisher(
+            Bool,
+            interface_supported_topic,
+            qos,
+        )
+        self.interface_status_pub = self.create_publisher(
+            String,
+            interface_status_topic,
+            qos,
+        )
 
         hz = float(self.get_parameter("pub_hz").value)
         if hz <= 0.0:
@@ -195,6 +213,15 @@ class MavrosRcOverrideBridge(Node):
         self.get_logger().info(
             f"Override enable topic: {override_enable_topic} " f"(default={self._override_enabled})"
         )
+        self._publish_interface_status("startup")
+        if not self._interface_ready():
+            self.get_logger().error(
+                "Active avoidance actuator output is BLOCKED until a supported FCU "
+                "actuator interface is confirmed."
+            )
+            self.get_logger().error(
+                "FCU actuator interface not confirmed; blocking active avoidance output."
+            )
 
     # ===================== OVERRIDE ENABLE =====================
     def _on_override_enable(self, msg: Bool) -> None:
@@ -326,6 +353,47 @@ class MavrosRcOverrideBridge(Node):
         # Semua channel = 0 -> CHAN_RELEASE (melepas override)
         self.pub.publish(self._build_override([]))
 
+    def _actuator_interface_name(self) -> str:
+        return str(self.get_parameter("actuator_interface").value).strip() or "unset"
+
+    def _interface_supported(self) -> bool:
+        return bool(self.get_parameter("actuator_interface_supported").value)
+
+    def _interface_confirmed(self) -> bool:
+        return bool(self.get_parameter("actuator_interface_confirmed").value)
+
+    def _interface_ready(self) -> bool:
+        return (
+            self._actuator_interface_name() == "rc_override"
+            and self._interface_supported()
+            and self._interface_confirmed()
+        )
+
+    def _publish_interface_status(self, reason: str) -> None:
+        supported = self._interface_supported()
+        confirmed = self._interface_confirmed()
+        ready = self._interface_ready()
+        interface = self._actuator_interface_name()
+        self.interface_supported_pub.publish(Bool(data=bool(ready)))
+        payload = (
+            f"interface={interface};supported={str(supported).lower()};"
+            f"confirmed={str(confirmed).lower()};ready={str(ready).lower()};"
+            f"reason={str(reason)}"
+        )
+        self.interface_status_pub.publish(String(data=payload))
+
+    def _log_interface_blocked(self, now) -> None:
+        period = float(self.get_parameter("log_period_s").value)
+        if period <= 0.0:
+            period = 1.0
+        since = (now - self._last_interface_log_time).nanoseconds / 1e9
+        if since < period:
+            return
+        self._last_interface_log_time = now
+        self.get_logger().error(
+            "FCU actuator interface not confirmed; blocking active avoidance output."
+        )
+
     # ===================== MAIN TICK =====================
     def _tick(self) -> None:
         now = self.get_clock().now()
@@ -338,6 +406,7 @@ class MavrosRcOverrideBridge(Node):
         if not bool(self.get_parameter("enable").value):
             if publish_release_when_disabled:
                 self._publish_release()
+            self._publish_interface_status("node_disabled")
             self._log_periodic(now, "DISABLED", "RC_OVERRIDE_RELEASE")
             return
 
@@ -345,8 +414,18 @@ class MavrosRcOverrideBridge(Node):
         if not self._override_enabled:
             if publish_release_when_disabled:
                 self._publish_release()
+            self._publish_interface_status("override_disabled")
             self._log_periodic(now, "OVERRIDE_OFF", "RC_OVERRIDE_RELEASE")
             return
+
+        if not self._interface_ready():
+            self._publish_release()
+            self._publish_interface_status("active_output_blocked_not_confirmed")
+            self._log_interface_blocked(now)
+            self._log_periodic(now, "ACTUATOR_BLOCKED", "RC_OVERRIDE_RELEASE")
+            return
+
+        self._publish_interface_status("active_output_allowed")
 
         # ===== normal override path =====
         test_enable = bool(self.get_parameter("test_enable").value)

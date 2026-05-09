@@ -139,6 +139,17 @@ class WatchdogFailsafeNode(Node):
         self.declare_parameter("cmd_turn_left_slow", "TURN_LEFT_SLOW")
         self.declare_parameter("cmd_turn_right_slow", "TURN_RIGHT_SLOW")
         self.declare_parameter("cmd_stop", "STOP")
+        self.declare_parameter("cmd_turn_left", "TURN_LEFT")
+        self.declare_parameter("cmd_turn_right", "TURN_RIGHT")
+
+        # Final command_safe latch. This prevents a one-frame low-risk sample
+        # or HOLD_COURSE input from releasing an active STOP/TURN command.
+        self.declare_parameter("avoid_command_dwell_enable", True)
+        self.declare_parameter("avoid_command_dwell_s", 2.0)
+        self.declare_parameter("avoid_command_clear_hold_s", 1.0)
+        self.declare_parameter("avoid_command_risk_threshold", 0.55)
+        self.declare_parameter("avoid_command_stop_threshold", 0.92)
+        self.declare_parameter("avoid_command_release_risk", 0.35)
 
         # LOST triggers
         self.declare_parameter("lost_if_image_stale", True)
@@ -188,6 +199,10 @@ class WatchdogFailsafeNode(Node):
         )
         self.state_enter_t: float = _now_s()
         self.ok_since_t: Optional[float] = None
+
+        self.dwell_cmd: str = ""
+        self.dwell_until_t: float = 0.0
+        self.dwell_clear_since_t: Optional[float] = None
 
         # -------------------------
         # Subscribers
@@ -416,6 +431,85 @@ class WatchdogFailsafeNode(Node):
 
         return cmd_slow if cmd else cmd_hold
 
+    def _is_stop_or_turn_cmd(self, cmd: str) -> bool:
+        cmd_norm = _norm_mode(cmd)
+        stop_or_turn = {
+            _norm_mode(self.get_parameter("cmd_stop").value),
+            _norm_mode(self.get_parameter("cmd_turn_left").value),
+            _norm_mode(self.get_parameter("cmd_turn_right").value),
+        }
+        return cmd_norm in stop_or_turn
+
+    def _is_clearish_cmd(self, cmd: str) -> bool:
+        cmd_norm = _norm_mode(cmd)
+        clear_tokens = {
+            "",
+            _norm_mode(self.get_parameter("cmd_hold").value),
+            "HOLD",
+            "HOLD_COURSE",
+            "NONE",
+        }
+        return cmd_norm in clear_tokens
+
+    def _append_reason(self, reason: str, extra: str) -> str:
+        reason = str(reason or "")
+        if not reason:
+            return extra
+        if extra in reason.split(";"):
+            return reason
+        return f"{reason};{extra}"
+
+    def _apply_command_dwell(self, t: float, cmd_safe: str, reason: str) -> Tuple[str, str]:
+        if not bool(self.get_parameter("avoid_command_dwell_enable").value):
+            return cmd_safe, reason
+
+        dwell_s = max(0.0, float(self.get_parameter("avoid_command_dwell_s").value))
+        clear_hold_s = max(0.0, float(self.get_parameter("avoid_command_clear_hold_s").value))
+        avoid_risk = float(self.get_parameter("avoid_command_risk_threshold").value)
+        stop_risk = float(self.get_parameter("avoid_command_stop_threshold").value)
+        release_risk = float(self.get_parameter("avoid_command_release_risk").value)
+        cmd_stop = str(self.get_parameter("cmd_stop").value)
+        incoming_cmd = str(cmd_safe or "")
+
+        desired_cmd = ""
+        if float(self.risk) >= stop_risk:
+            desired_cmd = cmd_stop
+        elif self._is_stop_or_turn_cmd(incoming_cmd):
+            desired_cmd = incoming_cmd
+        elif float(self.risk) >= avoid_risk:
+            desired_cmd = cmd_stop
+
+        if desired_cmd:
+            self.dwell_cmd = desired_cmd
+            self.dwell_until_t = max(self.dwell_until_t, t + dwell_s)
+            self.dwell_clear_since_t = None
+
+        if not self.dwell_cmd:
+            return cmd_safe, reason
+
+        risk_clear = float(self.risk) <= release_risk
+        command_clear = self._is_clearish_cmd(incoming_cmd)
+        if t < self.dwell_until_t or not risk_clear or not command_clear:
+            self.dwell_clear_since_t = None
+            return (
+                self.dwell_cmd,
+                self._append_reason(reason, f"command_dwell:{self.dwell_cmd}"),
+            )
+
+        if self.dwell_clear_since_t is None:
+            self.dwell_clear_since_t = t
+
+        if (t - self.dwell_clear_since_t) < clear_hold_s:
+            return (
+                self.dwell_cmd,
+                self._append_reason(reason, f"command_dwell_clear_hold:{self.dwell_cmd}"),
+            )
+
+        self.dwell_cmd = ""
+        self.dwell_until_t = 0.0
+        self.dwell_clear_since_t = None
+        return cmd_safe, reason
+
     def _transition(self, new_state: str) -> None:
         new_state = str(new_state).strip().upper()
         if new_state == self.state:
@@ -537,6 +631,9 @@ class WatchdogFailsafeNode(Node):
             failsafe_active = False
             reason = "ok"
 
+        if not failsafe_active:
+            cmd_safe, reason = self._apply_command_dwell(t, cmd_safe, reason)
+
         self.pub_cmd_safe.publish(String(data=str(cmd_safe)))
         self.pub_failsafe.publish(Bool(data=bool(failsafe_active)))
         self.pub_reason.publish(String(data=str(reason)))
@@ -571,6 +668,14 @@ class WatchdogFailsafeNode(Node):
                 "freeze": round(self._age(self.last_freeze_t), 3),
             },
             "startup_grace": bool(self._in_startup_grace()),
+            "command_dwell": {
+                "enabled": bool(self.get_parameter("avoid_command_dwell_enable").value),
+                "cmd": self.dwell_cmd,
+                "remaining_s": round(max(0.0, self.dwell_until_t - t), 3),
+                "clear_hold_elapsed_s": 0.0
+                if self.dwell_clear_since_t is None
+                else round(max(0.0, t - self.dwell_clear_since_t), 3),
+            },
         }
         self.pub_status.publish(String(data=json.dumps(status, ensure_ascii=True)))
 
