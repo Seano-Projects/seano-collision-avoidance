@@ -51,3 +51,6 @@ __pycache__/
 # temporary outputs
 output.ts
 way.txt
+
+# Phase 7 local runtime PID files
+seano_ca_ws/.phase7_runtime/
