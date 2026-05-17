@@ -63,6 +63,10 @@ def _norm_mode(s: str) -> str:
     return str(s or "").strip().upper().replace("-", "_").replace(" ", "_")
 
 
+def _is_operator_manual_mode(mode: str) -> bool:
+    return _norm_mode(mode) in ("MANUAL", "STABILIZE")
+
+
 @dataclass
 class _MgrState:
     last_override: Optional[bool] = None
@@ -86,6 +90,10 @@ class _MgrState:
     rejoin_mode_match_since: float = 0.0
     avoid_active_decision: bool = False
     confirmed_avoid_session: bool = False
+    operator_manual_authority: bool = False
+    last_mode_request_mode: Optional[str] = None
+    last_mode_request_cause: str = ""
+    last_mode_request_t: float = 0.0
 
 
 class MissionModeManager(Node):
@@ -123,6 +131,7 @@ class MissionModeManager(Node):
         # Outputs
         self.declare_parameter("state_out_topic", "/ca/mode_manager_state")
         self.declare_parameter("event_out_topic", "/ca/mode_manager_event")
+        self.declare_parameter("operator_manual_authority_topic", "/seano/operator_manual_authority")
         self.declare_parameter("avoid_active_topic", "/ca/avoid_active")
         self.declare_parameter("rejoin_required_avoid_s", 0.50)
         self.declare_parameter("avoid_exit_hold_s", 0.75)
@@ -150,6 +159,9 @@ class MissionModeManager(Node):
         )
         self.pub_event = self.create_publisher(
             String, str(self.get_parameter("event_out_topic").value), _qos(10)
+        )
+        self.pub_operator_manual_authority = self.create_publisher(
+            Bool, str(self.get_parameter("operator_manual_authority_topic").value), _qos(10)
         )
         self.sub_avoid_active = self.create_subscription(
             Bool,
@@ -240,8 +252,10 @@ class MissionModeManager(Node):
             self.st.avoid_true_since = 0.0
 
     def _cb_mavros_state(self, msg: State) -> None:
+        prev_mode = _norm_mode(self.st.mavros_mode)
         self.st.mavros_connected = bool(msg.connected)
         self.st.mavros_mode = str(msg.mode or "UNKNOWN")
+        self._update_operator_manual_authority(prev_mode, _norm_mode(self.st.mavros_mode))
 
     def _cb_override(self, msg: Bool) -> None:
         cur = bool(msg.data)
@@ -328,6 +342,11 @@ class MissionModeManager(Node):
 
         mgr_state = self._compute_mgr_state(override_on=override_on, failsafe_on=failsafe_on)
         self.pub_state.publish(String(data=mgr_state))
+        self._publish_operator_manual_authority()
+
+        if bool(self.st.operator_manual_authority):
+            self._apply_operator_manual_inhibit("tick")
+            return
 
         if mgr_state == "REJOIN":
             self._tick_rejoin()
@@ -488,6 +507,14 @@ class MissionModeManager(Node):
                 self._clear_rejoin()
 
     def _start_rejoin(self, restore_mode: str, reason: str) -> None:
+        if bool(self.st.operator_manual_authority):
+            self._apply_operator_manual_inhibit("rejoin_start")
+            self._emit_event(
+                "REJOIN_SKIPPED",
+                {"reason": "operator_manual_authority", "restore_mode": _norm_mode(restore_mode)},
+            )
+            return
+
         target = _norm_mode(restore_mode) or _norm_mode(
             str(self.get_parameter("mission_mode_default").value)
         )
@@ -557,6 +584,82 @@ class MissionModeManager(Node):
             return cur
         return mission_default
 
+    def _publish_operator_manual_authority(self) -> None:
+        self.pub_operator_manual_authority.publish(
+            Bool(data=bool(self.st.operator_manual_authority))
+        )
+
+    def _manual_mode_is_system_controlled(self, mode: str) -> bool:
+        mode = _norm_mode(mode)
+        if not _is_operator_manual_mode(mode):
+            return False
+
+        req_mode = _norm_mode(self.st.last_mode_request_mode or "")
+        if req_mode != mode:
+            return False
+
+        cause = str(self.st.last_mode_request_cause or "").lower()
+        system_manual_request = any(
+            token in cause for token in ("takeover", "avoid", "failsafe")
+        )
+        if not system_manual_request:
+            return False
+
+        return bool(
+            getattr(self.st, "last_override", False)
+            or getattr(self.st, "last_failsafe", False)
+            or getattr(self.st, "avoid_active_decision", False)
+            or getattr(self.st, "confirmed_avoid_session", False)
+            or getattr(self.st, "rejoin_active", False)
+        )
+
+    def _update_operator_manual_authority(self, prev_mode: str, cur_mode: str) -> None:
+        cur_mode = _norm_mode(cur_mode)
+        if cur_mode == "AUTO":
+            self._set_operator_manual_authority(False, "mode_auto", cur_mode)
+            return
+
+        if _is_operator_manual_mode(cur_mode):
+            if bool(self.st.operator_manual_authority):
+                self._publish_operator_manual_authority()
+                return
+            if not self._manual_mode_is_system_controlled(cur_mode):
+                self._set_operator_manual_authority(True, "operator_selected_manual", cur_mode)
+            else:
+                self._set_operator_manual_authority(False, "system_controlled_manual", cur_mode)
+            return
+
+        if bool(self.st.operator_manual_authority):
+            self._set_operator_manual_authority(False, "mode_not_manual", cur_mode)
+
+    def _set_operator_manual_authority(self, active: bool, reason: str, mode: str) -> None:
+        active = bool(active)
+        if self.st.operator_manual_authority == active:
+            self._publish_operator_manual_authority()
+            return
+
+        self.st.operator_manual_authority = active
+        if active:
+            self._apply_operator_manual_inhibit(reason)
+
+        self._publish_operator_manual_authority()
+        self._emit_event(
+            "OPERATOR_MANUAL_AUTHORITY",
+            {
+                "active": active,
+                "mode": _norm_mode(mode),
+                "reason": str(reason),
+            },
+        )
+
+    def _apply_operator_manual_inhibit(self, reason: str) -> None:
+        if bool(getattr(self.st, "rejoin_active", False)):
+            self._cancel_rejoin("operator_manual_authority")
+        self.st.pending_mode = None
+        self.st.restore_mode_after_avoid = None
+        self.st.restore_mode_after_failsafe = None
+        self.st.confirmed_avoid_session = False
+
     def _manual_authority_guard_active(
         self,
         mgr_state: str,
@@ -583,6 +686,14 @@ class MissionModeManager(Node):
 
     def _request_mode(self, mode: str, cause: str) -> None:
         mode = _norm_mode(mode)
+        if bool(self.st.operator_manual_authority):
+            self._apply_operator_manual_inhibit("request_mode")
+            self._emit_event(
+                "MODE_REQ_SKIPPED",
+                {"mode": mode, "cause": cause, "reason": "operator_manual_authority"},
+            )
+            return
+
         # SEANO_AVOID_ACTIVE_MODE_REQUEST_GATE
         cause_l = str(cause).lower()
         avoid_target = _norm_mode(str(self.get_parameter("avoid_mode").value))
@@ -640,6 +751,9 @@ class MissionModeManager(Node):
         req.custom_mode = mode
 
         self.st.last_mode_req_t = now
+        self.st.last_mode_request_mode = mode
+        self.st.last_mode_request_cause = str(cause)
+        self.st.last_mode_request_t = now
         self.st.pending_mode = mode
         self.st.pending_since = now
         self._emit_event("MODE_REQ_SENT", {"mode": mode, "cause": cause})

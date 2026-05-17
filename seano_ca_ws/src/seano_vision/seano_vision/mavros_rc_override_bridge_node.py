@@ -68,6 +68,8 @@ class MavrosRcOverrideBridge(Node):
 
         # ========= NEW: override enable =========
         self.declare_parameter("override_enable_topic", "/seano/rc_override_enable")
+        self.declare_parameter("operator_manual_authority_topic", "/seano/operator_manual_authority")
+        self.declare_parameter("operator_manual_authority_timeout_s", 1.0)
         self.declare_parameter("override_enabled_default", True)
         self.declare_parameter("publish_release_when_disabled", True)
 
@@ -174,8 +176,20 @@ class MavrosRcOverrideBridge(Node):
 
         # NEW: override enable state
         self._override_enabled = bool(self.get_parameter("override_enabled_default").value)
+        self._operator_manual_authority = False
+        self._operator_manual_authority_seen = False
+        self._last_operator_manual_authority_time = self.get_clock().now()
         override_enable_topic = str(self.get_parameter("override_enable_topic").value)
+        operator_manual_authority_topic = str(
+            self.get_parameter("operator_manual_authority_topic").value
+        )
         self.create_subscription(Bool, override_enable_topic, self._on_override_enable, qos)
+        self.create_subscription(
+            Bool,
+            operator_manual_authority_topic,
+            self._on_operator_manual_authority,
+            qos,
+        )
 
         # Command subscriptions
         self.create_subscription(Float32, thr_topic, self._on_thr, qos)
@@ -213,6 +227,9 @@ class MavrosRcOverrideBridge(Node):
         self.get_logger().info(
             f"Override enable topic: {override_enable_topic} " f"(default={self._override_enabled})"
         )
+        self.get_logger().info(
+            f"Operator manual authority topic: {operator_manual_authority_topic}"
+        )
         self._publish_interface_status("startup")
         if not self._interface_ready():
             self.get_logger().error(
@@ -226,6 +243,11 @@ class MavrosRcOverrideBridge(Node):
     # ===================== OVERRIDE ENABLE =====================
     def _on_override_enable(self, msg: Bool) -> None:
         self._override_enabled = bool(msg.data)
+
+    def _on_operator_manual_authority(self, msg: Bool) -> None:
+        self._operator_manual_authority = bool(msg.data)
+        self._operator_manual_authority_seen = True
+        self._last_operator_manual_authority_time = self.get_clock().now()
 
     # ===================== INPUT CALLBACKS =====================
     def _touch_cmd(self) -> None:
@@ -394,6 +416,15 @@ class MavrosRcOverrideBridge(Node):
             "FCU actuator interface not confirmed; blocking active avoidance output."
         )
 
+    def _operator_manual_authority_stale(self, now) -> bool:
+        timeout_s = float(self.get_parameter("operator_manual_authority_timeout_s").value)
+        if timeout_s <= 0.0:
+            return False
+        if not self._operator_manual_authority_seen:
+            return True
+        age_s = (now - self._last_operator_manual_authority_time).nanoseconds / 1e9
+        return age_s > timeout_s
+
     # ===================== MAIN TICK =====================
     def _tick(self) -> None:
         now = self.get_clock().now()
@@ -408,6 +439,19 @@ class MavrosRcOverrideBridge(Node):
                 self._publish_release()
             self._publish_interface_status("node_disabled")
             self._log_periodic(now, "DISABLED", "RC_OVERRIDE_RELEASE")
+            return
+
+        operator_manual_authority_stale = self._operator_manual_authority_stale(now)
+        if self._operator_manual_authority or operator_manual_authority_stale:
+            if publish_release_when_disabled:
+                self._publish_release()
+            reason = (
+                "operator_manual_authority"
+                if self._operator_manual_authority
+                else "operator_manual_authority_stale"
+            )
+            self._publish_interface_status(reason)
+            self._log_periodic(now, reason.upper(), "RC_OVERRIDE_RELEASE")
             return
 
         # Jika override diminta OFF, kirim release terus (hold) supaya FCU benar-benar balik ke mission/manual.
