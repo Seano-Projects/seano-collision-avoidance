@@ -53,6 +53,14 @@ from sensor_msgs.msg import Image
 from std_msgs.msg import Bool, Float32, String
 from vision_msgs.msg import Detection2DArray
 
+from seano_vision.risk_policy import (
+    EMERGENCY_STOP_RISK,
+    HIGH_RISK_MIN,
+    LOW_RISK_MAX,
+    RELEASE_RISK_MAX,
+    classify_risk,
+)
+
 try:
     import cv2  # type: ignore
     from cv_bridge import CvBridge  # type: ignore
@@ -206,6 +214,20 @@ class RiskEvaluatorNode(Node):
         self.declare_parameter("vision_quality_topic", "/ca/vision_quality")
         self.declare_parameter("debug_image_topic", "/ca/debug_image")
 
+        # Downstream state mirrored for HUD/log synchronization only.
+        self.declare_parameter("safe_command_topic", "/ca/command_safe")
+        self.declare_parameter("failsafe_active_topic", "/ca/failsafe_active")
+        self.declare_parameter("auto_enable_topic", "/seano/auto_enable")
+        self.declare_parameter("rc_override_enable_topic", "/seano/rc_override_enable")
+        self.declare_parameter(
+            "operator_manual_authority_topic", "/seano/operator_manual_authority"
+        )
+        self.declare_parameter("mode_manager_state_topic", "/ca/mode_manager_state")
+        self.declare_parameter(
+            "interface_status_topic", "/seano/fcu_actuator_interface_status"
+        )
+        self.declare_parameter("hud_state_timeout_s", 1.0)
+
         self.declare_parameter("publish_debug_image", True)
         self.declare_parameter("min_det_score", 0.35)
 
@@ -267,15 +289,15 @@ class RiskEvaluatorNode(Node):
         self.declare_parameter("ttc_score_horizon_s", 6.0)
 
         # Avoid hysteresis
-        self.declare_parameter("enter_avoid_risk", 0.55)
-        self.declare_parameter("exit_avoid_risk", 0.35)
+        self.declare_parameter("enter_avoid_risk", LOW_RISK_MAX)
+        self.declare_parameter("exit_avoid_risk", RELEASE_RISK_MAX)
         self.declare_parameter("min_cmd_hold_s", 0.6)
 
         # Command severity thresholds
-        self.declare_parameter("risk_slow_threshold", 0.45)
-        self.declare_parameter("risk_turn_slow_threshold", 0.55)
-        self.declare_parameter("risk_turn_threshold", 0.75)
-        self.declare_parameter("risk_stop_threshold", 0.92)
+        self.declare_parameter("risk_slow_threshold", LOW_RISK_MAX)
+        self.declare_parameter("risk_turn_slow_threshold", LOW_RISK_MAX)
+        self.declare_parameter("risk_turn_threshold", HIGH_RISK_MIN)
+        self.declare_parameter("risk_stop_threshold", EMERGENCY_STOP_RISK)
         self.declare_parameter("vttc_turn_threshold_s", 4.0)
         self.declare_parameter("vttc_stop_threshold_s", 1.2)
 
@@ -402,6 +424,23 @@ class RiskEvaluatorNode(Node):
         self.last_img_rx_t = 0.0
         self.last_det_rx_t = 0.0
 
+        # Downstream HUD synchronization state. These values are display-only
+        # and must not feed back into risk or actuation decisions.
+        self.safe_command = ""
+        self.safe_command_t = 0.0
+        self.failsafe_active = False
+        self.failsafe_active_t = 0.0
+        self.auto_enable = False
+        self.auto_enable_t = 0.0
+        self.rc_override_enable = False
+        self.rc_override_enable_t = 0.0
+        self.operator_manual_authority = False
+        self.operator_manual_authority_t = 0.0
+        self.mode_manager_state = ""
+        self.mode_manager_state_t = 0.0
+        self.interface_status = ""
+        self.interface_status_t = 0.0
+
         # Mode state machine
         self.mode = "NORMAL"
         self.lost_since = 0.0
@@ -452,8 +491,8 @@ class RiskEvaluatorNode(Node):
         # Sensitive avoid-active latch for low-FPS monocular video.
         # This makes /ca/avoid_active usable by the mode manager even when
         # the detector/risk pulse is only one or two frames long.
-        self.declare_parameter("avoid_active_enter_risk", 0.45)
-        self.declare_parameter("avoid_active_exit_risk", 0.20)
+        self.declare_parameter("avoid_active_enter_risk", LOW_RISK_MAX)
+        self.declare_parameter("avoid_active_exit_risk", RELEASE_RISK_MAX)
         self.declare_parameter("avoid_active_hold_s", 0.75)
         self.declare_parameter("avoid_active_force_from_risk", False)
         self._avoid_active_latched = False
@@ -501,6 +540,49 @@ class RiskEvaluatorNode(Node):
         else:
             self.sub_freeze = None
             self.sub_freeze_reason = None
+
+        self.sub_safe_cmd = self.create_subscription(
+            String,
+            str(self.get_parameter("safe_command_topic").value),
+            self.on_safe_command,
+            10,
+        )
+        self.sub_failsafe_active = self.create_subscription(
+            Bool,
+            str(self.get_parameter("failsafe_active_topic").value),
+            self.on_failsafe_active,
+            10,
+        )
+        self.sub_auto_enable = self.create_subscription(
+            Bool,
+            str(self.get_parameter("auto_enable_topic").value),
+            self.on_auto_enable,
+            10,
+        )
+        self.sub_rc_override_enable = self.create_subscription(
+            Bool,
+            str(self.get_parameter("rc_override_enable_topic").value),
+            self.on_rc_override_enable,
+            10,
+        )
+        self.sub_operator_manual_authority = self.create_subscription(
+            Bool,
+            str(self.get_parameter("operator_manual_authority_topic").value),
+            self.on_operator_manual_authority,
+            10,
+        )
+        self.sub_mode_manager_state = self.create_subscription(
+            String,
+            str(self.get_parameter("mode_manager_state_topic").value),
+            self.on_mode_manager_state,
+            10,
+        )
+        self.sub_interface_status = self.create_subscription(
+            String,
+            str(self.get_parameter("interface_status_topic").value),
+            self.on_interface_status,
+            10,
+        )
 
         # timer (failsafe tick)
         hz = float(self.get_parameter("tick_hz").value)
@@ -846,6 +928,34 @@ class RiskEvaluatorNode(Node):
         self.freeze_reason = str(msg.data)
         self.freeze_reason_last_t = time.time()
 
+    def on_safe_command(self, msg: String) -> None:
+        self.safe_command = str(msg.data).strip()
+        self.safe_command_t = time.time()
+
+    def on_failsafe_active(self, msg: Bool) -> None:
+        self.failsafe_active = bool(msg.data)
+        self.failsafe_active_t = time.time()
+
+    def on_auto_enable(self, msg: Bool) -> None:
+        self.auto_enable = bool(msg.data)
+        self.auto_enable_t = time.time()
+
+    def on_rc_override_enable(self, msg: Bool) -> None:
+        self.rc_override_enable = bool(msg.data)
+        self.rc_override_enable_t = time.time()
+
+    def on_operator_manual_authority(self, msg: Bool) -> None:
+        self.operator_manual_authority = bool(msg.data)
+        self.operator_manual_authority_t = time.time()
+
+    def on_mode_manager_state(self, msg: String) -> None:
+        self.mode_manager_state = str(msg.data).strip().upper()
+        self.mode_manager_state_t = time.time()
+
+    def on_interface_status(self, msg: String) -> None:
+        self.interface_status = str(msg.data).strip()
+        self.interface_status_t = time.time()
+
     # --------------------------
     # Image callback (buffer + optional internal VQ)
     # --------------------------
@@ -940,6 +1050,152 @@ class RiskEvaluatorNode(Node):
                 return None
         return best
 
+    def _topic_age_s(self, stamp_s: float, now_s: Optional[float] = None) -> float:
+        if stamp_s <= 0.0:
+            return 1e9
+        if now_s is None:
+            now_s = time.time()
+        return max(0.0, float(now_s) - float(stamp_s))
+
+    def _topic_valid(self, stamp_s: float, now_s: float) -> bool:
+        timeout_s = max(0.0, float(self.get_parameter("hud_state_timeout_s").value))
+        return stamp_s > 0.0 and self._topic_age_s(stamp_s, now_s) <= timeout_s
+
+    def _interface_ready_from_status(self, status: str) -> Optional[bool]:
+        text = str(status or "").strip().lower()
+        if not text:
+            return None
+        if "ready=true" in text:
+            return True
+        if "ready=false" in text:
+            return False
+        return None
+
+    def _is_hold_command(self, cmd: str) -> bool:
+        hold = str(self.get_parameter("cmd_hold").value).strip().upper()
+        return str(cmd or "").strip().upper() in ("", hold)
+
+    def _sync_hud_metrics(
+        self,
+        metrics: dict,
+        raw_cmd: str,
+        risk_value: float,
+        avoid_decision_active: bool,
+    ) -> None:
+        now_s = time.time()
+        source_ts = float(metrics.get("ts", now_s))
+        risk_v = clamp(float(risk_value), 0.0, 1.0)
+
+        safe_valid = self._topic_valid(self.safe_command_t, now_s)
+        failsafe_valid = self._topic_valid(self.failsafe_active_t, now_s)
+        auto_valid = self._topic_valid(self.auto_enable_t, now_s)
+        rc_valid = self._topic_valid(self.rc_override_enable_t, now_s)
+        manual_valid = self._topic_valid(self.operator_manual_authority_t, now_s)
+        mode_mgr_valid = self._topic_valid(self.mode_manager_state_t, now_s)
+        interface_valid = self._topic_valid(self.interface_status_t, now_s)
+
+        raw_cmd_s = str(raw_cmd or "").strip()
+        selected_cmd = self.safe_command if safe_valid and self.safe_command else raw_cmd_s
+        selected_cmd = str(selected_cmd or "").strip()
+
+        command_active = not self._is_hold_command(selected_cmd)
+        medium_or_high_risk = risk_v >= LOW_RISK_MAX
+        failsafe_active = bool(failsafe_valid and self.failsafe_active)
+        auto_enable = bool(auto_valid and self.auto_enable)
+        takeover_active = bool(rc_valid and self.rc_override_enable)
+        mode_mgr_state = self.mode_manager_state if mode_mgr_valid else "STALE"
+        mode_mgr_avoid = mode_mgr_state in ("AVOID", "FAILSAFE")
+
+        ca_active = bool(
+            medium_or_high_risk
+            or command_active
+            or avoid_decision_active
+            or failsafe_active
+            or auto_enable
+            or takeover_active
+            or mode_mgr_avoid
+        )
+
+        manual_age = self._topic_age_s(self.operator_manual_authority_t, now_s)
+        manual_stale = not manual_valid
+        manual_active = bool(manual_valid and self.operator_manual_authority)
+
+        interface_ready = (
+            self._interface_ready_from_status(self.interface_status) if interface_valid else None
+        )
+        block_reasons: List[str] = []
+        if manual_active:
+            block_reasons.append("operator_manual_authority")
+        if manual_stale:
+            block_reasons.append("operator_manual_authority_stale")
+        if interface_ready is False:
+            block_reasons.append("actuator_interface_not_ready")
+
+        if not takeover_active:
+            override_state = "RELEASE"
+        elif block_reasons:
+            override_state = "BLOCKED_" + "+".join(block_reasons)
+        elif interface_ready is None:
+            override_state = "UNKNOWN_INTERFACE"
+        else:
+            override_state = "ACTIVE"
+
+        ages = {
+            "safe_command": round(self._topic_age_s(self.safe_command_t, now_s), 3),
+            "failsafe_active": round(self._topic_age_s(self.failsafe_active_t, now_s), 3),
+            "auto_enable": round(self._topic_age_s(self.auto_enable_t, now_s), 3),
+            "rc_override_enable": round(self._topic_age_s(self.rc_override_enable_t, now_s), 3),
+            "operator_manual_authority": round(manual_age, 3),
+            "mode_manager_state": round(self._topic_age_s(self.mode_manager_state_t, now_s), 3),
+            "interface_status": round(self._topic_age_s(self.interface_status_t, now_s), 3),
+            "source": round(max(0.0, now_s - source_ts), 3),
+        }
+
+        metrics["risk_raw"] = float(risk_v)
+        metrics["risk_class"] = classify_risk(risk_v)
+        metrics["command_raw"] = raw_cmd_s
+        metrics["command_safe"] = self.safe_command if safe_valid else "STALE"
+        metrics["command_selected"] = selected_cmd
+        metrics["avoid_active_decision"] = bool(avoid_decision_active)
+        metrics["ca_active"] = bool(ca_active)
+        metrics["avoid_active"] = bool(ca_active)
+        metrics["takeover_active"] = bool(takeover_active)
+        metrics["auto_enable"] = bool(auto_enable)
+        metrics["failsafe_active"] = bool(failsafe_active)
+        metrics["operator_manual_authority"] = bool(manual_active)
+        metrics["operator_manual_authority_stale"] = bool(manual_stale)
+        metrics["mode_manager_state"] = mode_mgr_state
+        metrics["override_active"] = override_state == "ACTIVE"
+        metrics["override_blocked"] = override_state.startswith("BLOCKED")
+        metrics["override_state"] = override_state
+        metrics["override_block_reasons"] = block_reasons
+        metrics["actuator_interface_ready"] = interface_ready
+        metrics["source_timestamp"] = source_ts
+        metrics["source_age_s"] = round(max(0.0, now_s - source_ts), 3)
+        metrics["sync_ages_s"] = ages
+
+    def _log_phase7_sync(self, metrics: dict) -> None:
+        try:
+            self.get_logger().info(
+                "phase7_sync "
+                f"risk_raw={float(metrics.get('risk_raw', 0.0)):.3f} "
+                f"risk_class={metrics.get('risk_class', 'UNKNOWN')} "
+                f"command_raw={metrics.get('command_raw', '')} "
+                f"command_selected={metrics.get('command_selected', '')} "
+                f"auto_enable={bool(metrics.get('auto_enable', False))} "
+                f"avoid_active={bool(metrics.get('avoid_active', False))} "
+                f"takeover_active={bool(metrics.get('takeover_active', False))} "
+                f"override_active={bool(metrics.get('override_active', False))} "
+                f"override_blocked={bool(metrics.get('override_blocked', False))} "
+                f"override_state={metrics.get('override_state', 'UNKNOWN')} "
+                f"operator_manual_authority={bool(metrics.get('operator_manual_authority', False))} "
+                f"source_timestamp={float(metrics.get('source_timestamp', 0.0)):.3f} "
+                f"source_age_s={float(metrics.get('source_age_s', 0.0)):.3f}",
+                throttle_duration_sec=1.0,
+            )
+        except Exception:
+            pass
+
     # --------------------------
     # Detections callback (update tracks; decision also happens here)
     # --------------------------
@@ -1026,7 +1282,7 @@ class RiskEvaluatorNode(Node):
                 if cmd.startswith("TURN"):
                     cmd = str(self.get_parameter("cmd_slow").value)
                     metrics.setdefault("reason_codes", []).append("CAUTION_DEESCALATE_TURN")
-                if overall_risk < 0.25:
+                if overall_risk < RELEASE_RISK_MAX:
                     cmd = str(self.get_parameter("cmd_hold").value)
                     metrics.setdefault("reason_codes", []).append("CAUTION_HOLD_LOW_RISK")
                 self._maybe_update_cmd(t, cmd, float(self.get_parameter("min_cmd_hold_s").value))
@@ -1057,8 +1313,14 @@ class RiskEvaluatorNode(Node):
             float(getattr(self, "_last_published_risk", 0.0)),
         )
         metrics["avoid_active_raw"] = bool(raw_avoid_active)
-        metrics["avoid_active"] = bool(governed_avoid_active)
+        metrics["avoid_active_decision"] = bool(governed_avoid_active)
         self.pub_avoid_active.publish(Bool(data=bool(governed_avoid_active)))
+        self._sync_hud_metrics(
+            metrics=metrics,
+            raw_cmd=str(cmd),
+            risk_value=float(overall_risk),
+            avoid_decision_active=bool(governed_avoid_active),
+        )
 
         vq = float(metrics.get("vision_quality", 1.0))
         self.pub_vq.publish(Float32(data=float(vq)))
@@ -1067,6 +1329,7 @@ class RiskEvaluatorNode(Node):
             self.pub_metrics.publish(String(data=json.dumps(metrics)))
         except Exception:
             pass
+        self._log_phase7_sync(metrics)
 
         if bool(self.get_parameter("publish_debug_image").value):
             self._publish_debug_overlay(det_msg, metrics, top)
@@ -1538,13 +1801,7 @@ class RiskEvaluatorNode(Node):
         risk = clamp(risk, 0.0, 1.0)
         if risk >= float(self.get_parameter("risk_stop_threshold").value):
             return "EMERGENCY"
-        if risk >= float(self.get_parameter("risk_turn_threshold").value):
-            return "HIGH"
-        if risk >= float(self.get_parameter("risk_turn_slow_threshold").value):
-            return "MEDIUM"
-        if risk >= float(self.get_parameter("risk_slow_threshold").value):
-            return "LOW"
-        return "CLEAR"
+        return classify_risk(risk)
 
     def _dominant_factor(self, components: dict) -> str:
         factor_map = {
@@ -1622,7 +1879,7 @@ class RiskEvaluatorNode(Node):
         metrics["decision_gate"] = decision_gate
 
         if vq < vq_min:
-            desired = cmd_slow if risk > 0.25 else cmd_hold
+            desired = cmd_slow if risk >= LOW_RISK_MAX else cmd_hold
             self._maybe_update_cmd(t, desired, hold_s)
             metrics["cmd"] = self.last_cmd
             metrics["vision_guard"] = "vq_below_vq_min"
@@ -1836,9 +2093,9 @@ class RiskEvaluatorNode(Node):
         return best
 
     def _risk_color(self, risk: float) -> Tuple[int, int, int]:
-        if risk < 0.35:
+        if risk < LOW_RISK_MAX:
             return (0, 200, 80)
-        if risk < 0.70:
+        if risk < HIGH_RISK_MIN:
             return (0, 200, 255)
         return (0, 0, 255)
 
@@ -2036,12 +2293,23 @@ class RiskEvaluatorNode(Node):
         risk = float(metrics.get("risk", 0.0))
         accent = self._risk_color(risk)
 
-        cmd = _ascii_safe(str(metrics.get("cmd", "HOLD_COURSE")).replace("_", " "))
+        cmd_selected = _ascii_safe(
+            str(metrics.get("command_selected", metrics.get("cmd", "HOLD_COURSE"))).replace(
+                "_", " "
+            )
+        )
+        cmd_raw = _ascii_safe(str(metrics.get("command_raw", metrics.get("cmd", ""))).replace("_", " "))
+        cmd_safe = _ascii_safe(str(metrics.get("command_safe", "STALE")).replace("_", " "))
         vq = float(metrics.get("vision_quality", 1.0))
         ntrk = int(metrics.get("num_tracks", 0))
-        avoid = bool(metrics.get("avoid_mode", False))
+        ca_active = bool(metrics.get("ca_active", metrics.get("avoid_active", False)))
+        avoid_decision = bool(metrics.get("avoid_active_decision", False))
+        takeover_active = bool(metrics.get("takeover_active", False))
+        override_state = _ascii_safe(str(metrics.get("override_state", "UNKNOWN")))
+        manual = bool(metrics.get("operator_manual_authority", False))
         situation = _ascii_safe(str(metrics.get("situation", "UNKNOWN")).replace("_", " "))
         vmode = _ascii_safe(str(metrics.get("vision_mode", self.mode)))
+        mgr_state = _ascii_safe(str(metrics.get("mode_manager_state", "STALE")))
         colregs = _ascii_safe(str(metrics.get("colregs", "COLREG: --")))
         dominant_factor = _ascii_safe(str(metrics.get("dominant_factor", "--")))
 
@@ -2067,16 +2335,31 @@ class RiskEvaluatorNode(Node):
         freeze = bool(metrics.get("freeze", False))
         fr = _ascii_safe(str(metrics.get("freeze_reason", "unknown")))
         img_age = float(metrics.get("img_age_s", 0.0))
+        risk_class = _ascii_safe(str(metrics.get("risk_class", "--")))
         risk_stage = _ascii_safe(str(metrics.get("risk_stage", "--")))
         decision_gate = _ascii_safe(str(metrics.get("decision_gate", "--")))
+        source = _ascii_safe(str(metrics.get("source", "--")))
+        source_age = float(metrics.get("source_age_s", 0.0))
 
         lines: List[str] = []
-        lines.append(f"CMD: {cmd}")
-        lines.append(f"MODE: {vmode}   AVOID: {'ON' if avoid else 'OFF'}")
+        lines.append(f"CMD: {cmd_selected}   RAW: {cmd_raw}")
+        lines.append(f"SAFE: {cmd_safe}   MGR: {mgr_state}")
+        lines.append(
+            f"MODE: {vmode}   CA_ACTIVE: {'TRUE' if ca_active else 'FALSE'}"
+        )
+        lines.append(
+            f"AVOID_DECISION: {'ON' if avoid_decision else 'OFF'}   "
+            f"TAKEOVER: {'ON' if takeover_active else 'OFF'}"
+        )
+        lines.append(
+            f"OVERRIDE: {override_state}   MANUAL: {'TRUE' if manual else 'FALSE'}"
+        )
         lines.append(f"VQ: {vq:.2f}   TRK: {ntrk}   DET: {det_dt_txt}   FPS: {fps_txt}")
         lines.append(f"IMG_AGE: {img_age:.2f}s   FREEZE: {str(freeze)}   REASON: {fr}")
+        lines.append(f"SRC: {source}   AGE: {source_age:.2f}s")
         lines.append(f"GEOM: {geom_status}")
-        lines.append(f"SITUATION: {situation}   STAGE: {risk_stage}")
+        lines.append(f"SITUATION: {situation}   RISK_CLASS: {risk_class}")
+        lines.append(f"STAGE: {risk_stage}")
         lines.append(f"GATE: {decision_gate}   DOM: {dominant_factor}")
         lines.append(f"{colregs}")
 
@@ -2317,7 +2600,7 @@ class RiskEvaluatorNode(Node):
             return True
         if evaluator_avoid_mode and risk_v >= exit_risk:
             return True
-        if maneuver_cmd and risk_v >= min(enter_risk, 0.35):
+        if maneuver_cmd and risk_v >= min(enter_risk, LOW_RISK_MAX):
             return True
         return False
 
@@ -2466,8 +2749,8 @@ class RiskEvaluatorNode(Node):
         """
         now_s = self.get_clock().now().nanoseconds * 1e-9
 
-        enter_risk = self._pfloat_safe("avoid_active_enter_risk", 0.45)
-        exit_risk = self._pfloat_safe("avoid_active_exit_risk", 0.20)
+        enter_risk = self._pfloat_safe("avoid_active_enter_risk", LOW_RISK_MAX)
+        exit_risk = self._pfloat_safe("avoid_active_exit_risk", RELEASE_RISK_MAX)
         hold_s = max(0.0, self._pfloat_safe("avoid_active_hold_s", 0.75))
         force_from_risk = self._pbool_safe("avoid_active_force_from_risk", False)
 
