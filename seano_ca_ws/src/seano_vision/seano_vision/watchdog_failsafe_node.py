@@ -33,6 +33,8 @@ from rclpy.qos import (
 from sensor_msgs.msg import Image
 from std_msgs.msg import Bool, Float32, String
 
+from seano_vision.risk_policy import EMERGENCY_STOP_RISK, LOW_RISK_MAX, RELEASE_RISK_MAX
+
 
 def _qos(depth: int = 1, reliability: str = "best_effort") -> QoSProfile:
     rel = str(reliability).strip().lower()
@@ -147,9 +149,9 @@ class WatchdogFailsafeNode(Node):
         self.declare_parameter("avoid_command_dwell_enable", True)
         self.declare_parameter("avoid_command_dwell_s", 2.0)
         self.declare_parameter("avoid_command_clear_hold_s", 1.0)
-        self.declare_parameter("avoid_command_risk_threshold", 0.55)
-        self.declare_parameter("avoid_command_stop_threshold", 0.92)
-        self.declare_parameter("avoid_command_release_risk", 0.35)
+        self.declare_parameter("avoid_command_risk_threshold", LOW_RISK_MAX)
+        self.declare_parameter("avoid_command_stop_threshold", EMERGENCY_STOP_RISK)
+        self.declare_parameter("avoid_command_release_risk", RELEASE_RISK_MAX)
 
         # LOST triggers
         self.declare_parameter("lost_if_image_stale", True)
@@ -440,6 +442,18 @@ class WatchdogFailsafeNode(Node):
         }
         return cmd_norm in stop_or_turn
 
+    def _is_avoid_cmd(self, cmd: str) -> bool:
+        cmd_norm = _norm_mode(cmd)
+        avoid_cmds = {
+            _norm_mode(self.get_parameter("cmd_slow").value),
+            _norm_mode(self.get_parameter("cmd_turn_left_slow").value),
+            _norm_mode(self.get_parameter("cmd_turn_right_slow").value),
+            _norm_mode(self.get_parameter("cmd_stop").value),
+            _norm_mode(self.get_parameter("cmd_turn_left").value),
+            _norm_mode(self.get_parameter("cmd_turn_right").value),
+        }
+        return cmd_norm in avoid_cmds
+
     def _is_clearish_cmd(self, cmd: str) -> bool:
         cmd_norm = _norm_mode(cmd)
         clear_tokens = {
@@ -476,8 +490,8 @@ class WatchdogFailsafeNode(Node):
             desired_cmd = cmd_stop
         elif self._is_stop_or_turn_cmd(incoming_cmd):
             desired_cmd = incoming_cmd
-        elif float(self.risk) >= avoid_risk:
-            desired_cmd = cmd_stop
+        elif float(self.risk) >= avoid_risk and self._is_avoid_cmd(incoming_cmd):
+            desired_cmd = incoming_cmd
 
         if desired_cmd:
             self.dwell_cmd = desired_cmd

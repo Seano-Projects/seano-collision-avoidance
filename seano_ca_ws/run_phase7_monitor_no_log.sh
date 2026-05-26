@@ -47,13 +47,14 @@ echo
 echo "[RUN] CA event logger is DISABLED."
 
 setsid ros2 launch seano_vision phase7_cuav_usb_hardware.launch.py \
-  use_mavros:=true \
+  use_mavros:=false \
   use_ca_pipeline:=true \
   use_takeover_manager:=true \
   use_mode_manager:=true \
   master_enable_on_start:=true \
+  actuator_interface_confirmed:=true \
   ca_runtime_profile:=usb_watchdog \
-  ca_det_publish_annotated:=true \
+  ca_det_publish_annotated:=false \
   use_event_logger:=false &
 
 LAUNCH_PID=$!
