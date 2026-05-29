@@ -14,6 +14,9 @@ TOKEN_RE = re.compile(r"([a-zA-Z_][a-zA-Z0-9_]*)=([^ \n]+)")
 LOW_OK = {"", "HOLD_COURSE", "RC_OVERRIDE_RELEASE", "RELEASE"}
 MEDIUM_OK = {"SLOW_DOWN", "TURN_LEFT_SLOW", "TURN_RIGHT_SLOW"}
 HIGH_OK = {"STOP", "TURN_LEFT", "TURN_RIGHT"}
+LOW_EXCEPTION_SOURCES = {"FAILSAFE", "EMERGENCY", "EMERGENCY_VTTC", "RECOVERY"}
+MEDIUM_EXCEPTION_SOURCES = {"FAILSAFE", "EMERGENCY", "EMERGENCY_VTTC"}
+RELEASE_STATES = {"RELEASE", "OVERRIDE_OFF", "PASSIVE"}
 
 
 def parse_bool(value: str) -> bool:
@@ -21,6 +24,10 @@ def parse_bool(value: str) -> bool:
 
 
 def normalize_command(value: str) -> str:
+    return str(value or "").strip().upper().replace("'", "").replace('"', "")
+
+
+def normalize_source(value: str) -> str:
     return str(value or "").strip().upper().replace("'", "").replace('"', "")
 
 
@@ -34,28 +41,43 @@ def parse_phase7_sync(lines: Iterable[str]) -> Iterable[Tuple[int, str, Dict[str
 def check_record(lineno: int, row: Dict[str, str]) -> List[str]:
     findings: List[str] = []
     risk_class = str(row.get("risk_class", "UNKNOWN")).upper()
-    cmd = normalize_command(row.get("command_selected", ""))
+    cmd = normalize_command(row.get("selected_command", row.get("command_selected", "")))
+    source = normalize_source(row.get("command_source", "UNKNOWN"))
+    latched = parse_bool(row.get("command_latched", "false"))
+    policy_valid = parse_bool(row.get("command_policy_valid", "true"))
     avoid_active = parse_bool(row.get("avoid_active", "false"))
+    ca_active = parse_bool(row.get("ca_active", str(avoid_active).lower()))
     auto_enable = parse_bool(row.get("auto_enable", "false"))
     takeover_active = parse_bool(row.get("takeover_active", "false"))
     override_active = parse_bool(row.get("override_active", "false"))
+    override_state = normalize_source(row.get("override_state", "UNKNOWN"))
     manual_authority = parse_bool(row.get("operator_manual_authority", "false"))
+    release_state = override_state in RELEASE_STATES or cmd in {"RC_OVERRIDE_RELEASE", "RELEASE"}
+
+    if not policy_valid:
+        findings.append(f"{lineno}: command_policy_valid=false for selected command {cmd}")
 
     if risk_class == "LOW" and cmd not in LOW_OK:
-        findings.append(f"{lineno}: LOW risk selected non-release command {cmd}")
+        if not (latched or source in LOW_EXCEPTION_SOURCES):
+            findings.append(
+                f"{lineno}: LOW risk selected non-release command {cmd} "
+                f"without latch/exception source={source}"
+            )
 
-    if risk_class == "MEDIUM" and cmd not in MEDIUM_OK:
-        if not (manual_authority and cmd in LOW_OK):
+    if risk_class == "MEDIUM" and cmd in HIGH_OK:
+        if source not in MEDIUM_EXCEPTION_SOURCES:
             findings.append(f"{lineno}: MEDIUM risk selected non-medium command {cmd}")
 
-    if risk_class == "HIGH" and cmd not in HIGH_OK:
-        if not (manual_authority and cmd in LOW_OK):
-            findings.append(f"{lineno}: HIGH risk selected weak/unknown command {cmd}")
+    if risk_class == "HIGH" and cmd in LOW_OK and (ca_active or takeover_active):
+        if not (manual_authority or release_state):
+            findings.append(
+                f"{lineno}: HIGH risk selected HOLD/RELEASE while CA active/takeover true"
+            )
 
     if takeover_active and not avoid_active:
         findings.append(f"{lineno}: takeover_active=true while avoid_active=false")
 
-    if auto_enable and cmd in LOW_OK and not manual_authority:
+    if auto_enable and cmd in LOW_OK and not manual_authority and not release_state:
         findings.append(f"{lineno}: command_mux AUTO selected while command_selected={cmd}")
 
     if override_active and not avoid_active:
@@ -84,9 +106,16 @@ def main() -> int:
     for lineno, _line, row in records:
         counts["records"] += 1
         counts[f"risk_class:{str(row.get('risk_class', 'UNKNOWN')).upper()}"] += 1
-        counts[f"command:{normalize_command(row.get('command_selected', ''))}"] += 1
+        counts[
+            f"command:{normalize_command(row.get('selected_command', row.get('command_selected', '')))}"
+        ] += 1
+        counts[f"source:{normalize_source(row.get('command_source', 'UNKNOWN'))}"] += 1
         if parse_bool(row.get("avoid_active", "false")):
             counts["avoid_active:true"] += 1
+        if parse_bool(row.get("command_latched", "false")):
+            counts["command_latched:true"] += 1
+        if not parse_bool(row.get("command_policy_valid", "true")):
+            counts["command_policy_valid:false"] += 1
         if parse_bool(row.get("auto_enable", "false")):
             counts["auto_enable:true"] += 1
         if parse_bool(row.get("takeover_active", "false")):

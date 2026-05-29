@@ -33,7 +33,14 @@ from rclpy.qos import (
 from sensor_msgs.msg import Image
 from std_msgs.msg import Bool, Float32, String
 
-from seano_vision.risk_policy import EMERGENCY_STOP_RISK, LOW_RISK_MAX, RELEASE_RISK_MAX
+from seano_vision.risk_policy import (
+    EMERGENCY_STOP_RISK,
+    LOW_RISK_MAX,
+    RELEASE_RISK_MAX,
+    clamp_command_for_risk,
+    command_allowed_for_risk,
+    normalize_command,
+)
 
 
 def _qos(depth: int = 1, reliability: str = "best_effort") -> QoSProfile:
@@ -103,6 +110,8 @@ class WatchdogFailsafeNode(Node):
         self.declare_parameter("risk_topic", "/ca/risk")
         self.declare_parameter("mode_topic", "/ca/mode")
         self.declare_parameter("command_in_topic", "/ca/command")
+        self.declare_parameter("metrics_topic", "/ca/metrics")
+        self.declare_parameter("metrics_timeout_s", 1.0)
         self.declare_parameter("vision_quality_topic", "/vision/quality")
         self.declare_parameter("freeze_topic", "/vision/freeze")
         self.declare_parameter("freeze_reason_topic", "/vision/freeze_reason")
@@ -189,6 +198,12 @@ class WatchdogFailsafeNode(Node):
         self.last_cmd_t: Optional[float] = None
         self.cmd_in: str = "HOLD_COURSE"
 
+        self.last_metrics_t: Optional[float] = None
+        self.raw_command_source: str = "POLICY"
+        self.raw_command_latched: bool = False
+        self.raw_command_policy_valid: bool = True
+        self.raw_command_from_metrics: str = ""
+
         self.last_vq_t: Optional[float] = None
         self.vq: Optional[float] = None
 
@@ -235,6 +250,12 @@ class WatchdogFailsafeNode(Node):
             String,
             str(self.get_parameter("command_in_topic").value),
             self._on_cmd,
+            qos,
+        )
+        self.sub_metrics = self.create_subscription(
+            String,
+            str(self.get_parameter("metrics_topic").value),
+            self._on_metrics,
             qos,
         )
         self.sub_vq = self.create_subscription(
@@ -347,6 +368,40 @@ class WatchdogFailsafeNode(Node):
         self.last_cmd_t = _now_s()
         self.cmd_in = str(msg.data)
 
+    def _metric_bool(self, value, default: bool = False) -> bool:
+        if isinstance(value, bool):
+            return bool(value)
+        if isinstance(value, (int, float)):
+            return float(value) != 0.0
+        if isinstance(value, str):
+            return value.strip().lower() in ("1", "true", "yes", "on")
+        return bool(default)
+
+    def _on_metrics(self, msg: String) -> None:
+        try:
+            payload = json.loads(str(msg.data))
+        except Exception:
+            return
+        if not isinstance(payload, dict):
+            return
+
+        self.last_metrics_t = _now_s()
+        self.raw_command_source = (
+            str(payload.get("raw_command_source", payload.get("command_source", "POLICY")))
+            .strip()
+            .upper()
+        )
+        self.raw_command_latched = self._metric_bool(
+            payload.get("raw_command_latched", payload.get("command_latched", False))
+        )
+        self.raw_command_policy_valid = self._metric_bool(
+            payload.get("command_policy_valid", True),
+            default=True,
+        )
+        self.raw_command_from_metrics = str(
+            payload.get("raw_command", payload.get("command_raw", ""))
+        ).strip()
+
     def _on_vq(self, msg: Float32) -> None:
         self.last_vq_t = _now_s()
         try:
@@ -372,6 +427,16 @@ class WatchdogFailsafeNode(Node):
         if last_t is None:
             return 1e9
         return max(0.0, _now_s() - last_t)
+
+    def _metrics_source_for_cmd(self, cmd: str) -> Tuple[str, bool, bool]:
+        timeout_s = float(self.get_parameter("metrics_timeout_s").value)
+        if self._age(self.last_metrics_t) > timeout_s:
+            return "POLICY", False, True
+        if self.raw_command_from_metrics:
+            if normalize_command(self.raw_command_from_metrics) != normalize_command(cmd):
+                return "POLICY", False, True
+        source = self.raw_command_source or "POLICY"
+        return source, bool(self.raw_command_latched), bool(self.raw_command_policy_valid)
 
     def _in_startup_grace(self) -> bool:
         grace = float(self.get_parameter("startup_grace_s").value)
@@ -473,9 +538,9 @@ class WatchdogFailsafeNode(Node):
             return reason
         return f"{reason};{extra}"
 
-    def _apply_command_dwell(self, t: float, cmd_safe: str, reason: str) -> Tuple[str, str]:
+    def _apply_command_dwell(self, t: float, cmd_safe: str, reason: str) -> Tuple[str, str, bool]:
         if not bool(self.get_parameter("avoid_command_dwell_enable").value):
-            return cmd_safe, reason
+            return cmd_safe, reason, False
 
         dwell_s = max(0.0, float(self.get_parameter("avoid_command_dwell_s").value))
         clear_hold_s = max(0.0, float(self.get_parameter("avoid_command_clear_hold_s").value))
@@ -499,7 +564,7 @@ class WatchdogFailsafeNode(Node):
             self.dwell_clear_since_t = None
 
         if not self.dwell_cmd:
-            return cmd_safe, reason
+            return cmd_safe, reason, False
 
         risk_clear = float(self.risk) <= release_risk
         command_clear = self._is_clearish_cmd(incoming_cmd)
@@ -508,6 +573,7 @@ class WatchdogFailsafeNode(Node):
             return (
                 self.dwell_cmd,
                 self._append_reason(reason, f"command_dwell:{self.dwell_cmd}"),
+                True,
             )
 
         if self.dwell_clear_since_t is None:
@@ -517,12 +583,13 @@ class WatchdogFailsafeNode(Node):
             return (
                 self.dwell_cmd,
                 self._append_reason(reason, f"command_dwell_clear_hold:{self.dwell_cmd}"),
+                True,
             )
 
         self.dwell_cmd = ""
         self.dwell_until_t = 0.0
         self.dwell_clear_since_t = None
-        return cmd_safe, reason
+        return cmd_safe, reason, False
 
     def _transition(self, new_state: str) -> None:
         new_state = str(new_state).strip().upper()
@@ -629,13 +696,23 @@ class WatchdogFailsafeNode(Node):
 
         cmd_in_ok = self._age(self.last_cmd_t) <= cmd_to
         cmd_in = self.cmd_in if cmd_in_ok else ""
+        raw_source, raw_latched, raw_policy_valid = self._metrics_source_for_cmd(cmd_in)
+        command_source = raw_source
+        command_latched = bool(raw_latched)
 
         if self.state == "LOST":
             cmd_safe = cmd_stop
             failsafe_active = True
             reason = ";".join(lost_reasons) if lost_reasons else "lost"
+            command_source = "FAILSAFE"
+            command_latched = False
         elif self.state == "CAUTION":
-            cmd_safe = self._limit_cmd_for_caution(cmd_in)
+            if raw_source in ("EMERGENCY", "EMERGENCY_VTTC"):
+                cmd_safe = cmd_in if cmd_in else cmd_stop
+            else:
+                cmd_safe = self._limit_cmd_for_caution(cmd_in)
+                command_source = "POLICY"
+                command_latched = False
             if not cmd_safe:
                 cmd_safe = cmd_slow
             failsafe_active = False
@@ -644,9 +721,35 @@ class WatchdogFailsafeNode(Node):
             cmd_safe = cmd_in if cmd_in else cmd_hold
             failsafe_active = False
             reason = "ok"
+            if not cmd_in_ok:
+                command_source = "POLICY"
+                command_latched = False
 
         if not failsafe_active:
-            cmd_safe, reason = self._apply_command_dwell(t, cmd_safe, reason)
+            cmd_safe, reason, dwell_latched = self._apply_command_dwell(t, cmd_safe, reason)
+            if dwell_latched:
+                command_source = "LATCHED"
+                command_latched = True
+
+        cmd_before_policy = str(cmd_safe)
+        cmd_safe, command_policy_input_valid, risk_class = clamp_command_for_risk(
+            cmd_safe,
+            self.risk,
+            command_source=command_source,
+            command_latched=command_latched,
+        )
+        command_policy_valid = command_allowed_for_risk(
+            cmd_safe,
+            self.risk,
+            command_source=command_source,
+            command_latched=command_latched,
+        )
+        command_policy_clamped = normalize_command(cmd_before_policy) != normalize_command(cmd_safe)
+        if command_policy_clamped:
+            reason = self._append_reason(
+                reason,
+                f"command_policy_clamp:{risk_class}:{cmd_before_policy}->{cmd_safe}",
+            )
 
         self.pub_cmd_safe.publish(String(data=str(cmd_safe)))
         self.pub_failsafe.publish(Bool(data=bool(failsafe_active)))
@@ -660,6 +763,19 @@ class WatchdogFailsafeNode(Node):
             "state": self.state,
             "failsafe_active": bool(failsafe_active),
             "reason": reason,
+            "risk_raw": round(float(self.risk), 3),
+            "risk_class": risk_class,
+            "raw_command": cmd_in,
+            "safe_command": cmd_safe,
+            "selected_command": cmd_safe,
+            "command_source": command_source,
+            "command_latched": bool(command_latched),
+            "command_policy_valid": bool(command_policy_valid),
+            "command_policy_input_valid": bool(command_policy_input_valid),
+            "command_policy_clamped": bool(command_policy_clamped),
+            "raw_command_source": raw_source,
+            "raw_command_latched": bool(raw_latched),
+            "raw_command_policy_valid": bool(raw_policy_valid),
             "image": {
                 "best_topic": best_topic,
                 "best_age_s": round(best_age, 3),

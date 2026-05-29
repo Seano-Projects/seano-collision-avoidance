@@ -59,6 +59,9 @@ from seano_vision.risk_policy import (
     LOW_RISK_MAX,
     RELEASE_RISK_MAX,
     classify_risk,
+    clamp_command_for_risk,
+    command_allowed_for_risk,
+    normalize_command,
 )
 
 try:
@@ -216,6 +219,7 @@ class RiskEvaluatorNode(Node):
 
         # Downstream state mirrored for HUD/log synchronization only.
         self.declare_parameter("safe_command_topic", "/ca/command_safe")
+        self.declare_parameter("watchdog_status_topic", "/ca/watchdog_status")
         self.declare_parameter("failsafe_active_topic", "/ca/failsafe_active")
         self.declare_parameter("auto_enable_topic", "/seano/auto_enable")
         self.declare_parameter("rc_override_enable_topic", "/seano/rc_override_enable")
@@ -428,6 +432,8 @@ class RiskEvaluatorNode(Node):
         # and must not feed back into risk or actuation decisions.
         self.safe_command = ""
         self.safe_command_t = 0.0
+        self.watchdog_status: dict = {}
+        self.watchdog_status_t = 0.0
         self.failsafe_active = False
         self.failsafe_active_t = 0.0
         self.auto_enable = False
@@ -545,6 +551,12 @@ class RiskEvaluatorNode(Node):
             String,
             str(self.get_parameter("safe_command_topic").value),
             self.on_safe_command,
+            10,
+        )
+        self.sub_watchdog_status = self.create_subscription(
+            String,
+            str(self.get_parameter("watchdog_status_topic").value),
+            self.on_watchdog_status,
             10,
         )
         self.sub_failsafe_active = self.create_subscription(
@@ -932,6 +944,16 @@ class RiskEvaluatorNode(Node):
         self.safe_command = str(msg.data).strip()
         self.safe_command_t = time.time()
 
+    def on_watchdog_status(self, msg: String) -> None:
+        try:
+            payload = json.loads(str(msg.data))
+        except Exception:
+            return
+        if not isinstance(payload, dict):
+            return
+        self.watchdog_status = payload
+        self.watchdog_status_t = time.time()
+
     def on_failsafe_active(self, msg: Bool) -> None:
         self.failsafe_active = bool(msg.data)
         self.failsafe_active_t = time.time()
@@ -1075,6 +1097,112 @@ class RiskEvaluatorNode(Node):
         hold = str(self.get_parameter("cmd_hold").value).strip().upper()
         return str(cmd or "").strip().upper() in ("", hold)
 
+    def _bool_metric(self, value, default: bool = False) -> bool:
+        if isinstance(value, bool):
+            return bool(value)
+        if isinstance(value, (int, float)):
+            return float(value) != 0.0
+        if isinstance(value, str):
+            return value.strip().lower() in ("1", "true", "yes", "on")
+        return bool(default)
+
+    def _apply_desired_command_policy(
+        self,
+        t: float,
+        desired: str,
+        risk: float,
+        hold_s: float,
+        metrics: dict,
+        command_source: str = "POLICY",
+    ) -> str:
+        source = str(command_source or "POLICY").strip().upper()
+        desired_norm = normalize_command(desired)
+        clamped, _valid, risk_class = clamp_command_for_risk(
+            desired_norm,
+            risk,
+            command_source=source,
+            command_latched=False,
+        )
+
+        policy_clamped = clamped != desired_norm
+        if policy_clamped:
+            metrics.setdefault("reason_codes", []).append(
+                f"POLICY_CLAMP_{risk_class}_{desired_norm}_TO_{clamped}"
+            )
+
+        effective_hold_s = (
+            0.0
+            if source in ("FAILSAFE", "INVALID_DATA", "EMERGENCY", "EMERGENCY_VTTC")
+            else hold_s
+        )
+        updated = self._maybe_update_cmd(t, clamped, effective_hold_s)
+        latched = (not updated) and (normalize_command(self.last_cmd) != normalize_command(clamped))
+
+        metrics["cmd"] = self.last_cmd
+        metrics["command_source"] = "LATCHED" if latched else source
+        metrics["command_latched"] = bool(latched)
+        metrics["command_policy_valid"] = bool(
+            command_allowed_for_risk(
+                self.last_cmd,
+                risk,
+                command_source=metrics["command_source"],
+                command_latched=latched,
+            )
+        )
+        metrics["command_policy_clamped"] = bool(
+            policy_clamped or metrics.get("command_policy_clamped", False)
+        )
+        metrics["command_policy_original"] = desired_norm
+        metrics["command_policy_target"] = clamped
+        metrics["risk_class"] = risk_class
+        metrics["risk_raw"] = float(clamp(float(risk), 0.0, 1.0))
+        return self.last_cmd
+
+    def _finalize_raw_command_policy(
+        self,
+        t: float,
+        cmd: str,
+        risk: float,
+        metrics: dict,
+    ) -> str:
+        source = str(metrics.get("command_source", "POLICY") or "POLICY").strip().upper()
+        latched = self._bool_metric(metrics.get("command_latched", False))
+        original = normalize_command(cmd)
+        clamped, _valid, risk_class = clamp_command_for_risk(
+            original,
+            risk,
+            command_source=source,
+            command_latched=latched,
+        )
+        if clamped != original:
+            metrics.setdefault("reason_codes", []).append(
+                f"POLICY_OUTPUT_CLAMP_{risk_class}_{original}_TO_{clamped}"
+            )
+            if not (risk_class == "LOW" and latched):
+                self.last_cmd = clamped
+                self.last_cmd_time = t
+
+        final_valid = command_allowed_for_risk(
+            clamped,
+            risk,
+            command_source=source,
+            command_latched=latched,
+        )
+        metrics["cmd"] = clamped
+        metrics["risk_raw"] = float(clamp(float(risk), 0.0, 1.0))
+        metrics["risk_class"] = risk_class
+        metrics["raw_command"] = clamped
+        metrics["command_raw"] = clamped
+        metrics["command_source"] = source
+        metrics["command_latched"] = bool(latched)
+        metrics["command_policy_valid"] = bool(final_valid)
+        metrics["command_policy_clamped"] = bool(
+            (clamped != original) or metrics.get("command_policy_clamped", False)
+        )
+        metrics["command_policy_original"] = metrics.get("command_policy_original", original)
+        metrics["command_policy_output_original"] = original
+        return clamped
+
     def _sync_hud_metrics(
         self,
         metrics: dict,
@@ -1093,10 +1221,15 @@ class RiskEvaluatorNode(Node):
         manual_valid = self._topic_valid(self.operator_manual_authority_t, now_s)
         mode_mgr_valid = self._topic_valid(self.mode_manager_state_t, now_s)
         interface_valid = self._topic_valid(self.interface_status_t, now_s)
+        watchdog_valid = self._topic_valid(self.watchdog_status_t, now_s)
+        watchdog_status = self.watchdog_status if watchdog_valid else {}
+        if not isinstance(watchdog_status, dict):
+            watchdog_status = {}
 
         raw_cmd_s = str(raw_cmd or "").strip()
         selected_cmd = self.safe_command if safe_valid and self.safe_command else raw_cmd_s
         selected_cmd = str(selected_cmd or "").strip()
+        safe_cmd_s = self.safe_command if safe_valid else "STALE"
 
         command_active = not self._is_hold_command(selected_cmd)
         medium_or_high_risk = risk_v >= LOW_RISK_MAX
@@ -1140,8 +1273,43 @@ class RiskEvaluatorNode(Node):
         else:
             override_state = "ACTIVE"
 
+        raw_command_source = (
+            str(metrics.get("command_source", "POLICY") or "POLICY").strip().upper()
+        )
+        raw_command_latched = self._bool_metric(metrics.get("command_latched", False))
+        watchdog_source = str(
+            watchdog_status.get("command_source", "") if watchdog_status else ""
+        ).strip().upper()
+        watchdog_latched = self._bool_metric(
+            watchdog_status.get("command_latched", False) if watchdog_status else False
+        )
+        watchdog_policy_valid = self._bool_metric(
+            watchdog_status.get("command_policy_valid", True) if watchdog_status else True,
+            default=True,
+        )
+
+        selected_source = raw_command_source
+        selected_latched = raw_command_latched
+        if failsafe_active:
+            selected_source = "FAILSAFE"
+            selected_latched = False
+        elif watchdog_source:
+            selected_source = watchdog_source
+            selected_latched = watchdog_latched
+        elif safe_valid and normalize_command(selected_cmd) != normalize_command(raw_cmd_s):
+            selected_source = "WATCHDOG"
+            selected_latched = False
+
+        selected_policy_valid = command_allowed_for_risk(
+            selected_cmd,
+            risk_v,
+            command_source=selected_source,
+            command_latched=selected_latched,
+        ) and watchdog_policy_valid
+
         ages = {
             "safe_command": round(self._topic_age_s(self.safe_command_t, now_s), 3),
+            "watchdog_status": round(self._topic_age_s(self.watchdog_status_t, now_s), 3),
             "failsafe_active": round(self._topic_age_s(self.failsafe_active_t, now_s), 3),
             "auto_enable": round(self._topic_age_s(self.auto_enable_t, now_s), 3),
             "rc_override_enable": round(self._topic_age_s(self.rc_override_enable_t, now_s), 3),
@@ -1153,9 +1321,20 @@ class RiskEvaluatorNode(Node):
 
         metrics["risk_raw"] = float(risk_v)
         metrics["risk_class"] = classify_risk(risk_v)
+        metrics["raw_command"] = raw_cmd_s
+        metrics["safe_command"] = safe_cmd_s
+        metrics["selected_command"] = selected_cmd
         metrics["command_raw"] = raw_cmd_s
-        metrics["command_safe"] = self.safe_command if safe_valid else "STALE"
+        metrics["command_safe"] = safe_cmd_s
         metrics["command_selected"] = selected_cmd
+        metrics["raw_command_source"] = raw_command_source
+        metrics["raw_command_latched"] = bool(raw_command_latched)
+        metrics["command_source"] = selected_source
+        metrics["command_latched"] = bool(selected_latched)
+        metrics["command_policy_valid"] = bool(selected_policy_valid)
+        metrics["watchdog_command_source"] = watchdog_source or "STALE"
+        metrics["watchdog_command_latched"] = bool(watchdog_latched)
+        metrics["watchdog_command_policy_valid"] = bool(watchdog_policy_valid)
         metrics["avoid_active_decision"] = bool(avoid_decision_active)
         metrics["ca_active"] = bool(ca_active)
         metrics["avoid_active"] = bool(ca_active)
@@ -1180,8 +1359,15 @@ class RiskEvaluatorNode(Node):
                 "phase7_sync "
                 f"risk_raw={float(metrics.get('risk_raw', 0.0)):.3f} "
                 f"risk_class={metrics.get('risk_class', 'UNKNOWN')} "
+                f"raw_command={metrics.get('raw_command', metrics.get('command_raw', ''))} "
+                f"safe_command={metrics.get('safe_command', metrics.get('command_safe', ''))} "
+                f"selected_command={metrics.get('selected_command', metrics.get('command_selected', ''))} "
                 f"command_raw={metrics.get('command_raw', '')} "
+                f"command_safe={metrics.get('command_safe', '')} "
                 f"command_selected={metrics.get('command_selected', '')} "
+                f"command_source={metrics.get('command_source', 'UNKNOWN')} "
+                f"command_latched={bool(metrics.get('command_latched', False))} "
+                f"command_policy_valid={bool(metrics.get('command_policy_valid', False))} "
                 f"auto_enable={bool(metrics.get('auto_enable', False))} "
                 f"avoid_active={bool(metrics.get('avoid_active', False))} "
                 f"takeover_active={bool(metrics.get('takeover_active', False))} "
@@ -1259,6 +1445,8 @@ class RiskEvaluatorNode(Node):
                 metrics["cmd"] = cmd
                 metrics["decision_gate"] = "WAIT_IMAGE_GEOMETRY"
                 metrics["reason_codes"] = ["WAIT_IMAGE_GEOMETRY"]
+                metrics["command_source"] = "INVALID_DATA"
+                metrics["command_latched"] = False
             else:
                 cmd = str(self.get_parameter("cmd_stop").value)
                 overall_risk = max(float(overall_risk), 1.0 if self.last_det_rx_t > 0.0 else 0.60)
@@ -1266,6 +1454,8 @@ class RiskEvaluatorNode(Node):
                 metrics["cmd"] = cmd
                 metrics["decision_gate"] = "FORCED_GEOMETRY_INVALID"
                 metrics["reason_codes"] = ["IMAGE_GEOMETRY_INVALID", _ascii_safe(geom_status)]
+                metrics["command_source"] = "INVALID_DATA"
+                metrics["command_latched"] = False
                 self.tracks.clear()
         elif self.mode == "LOST_PERCEPTION":
             cmd = str(self.get_parameter("cmd_stop").value)
@@ -1274,6 +1464,8 @@ class RiskEvaluatorNode(Node):
             metrics["cmd"] = cmd
             metrics["decision_gate"] = "FORCED_LOST_PERCEPTION"
             metrics["reason_codes"] = ["LOST_PERCEPTION", "FORCED_STOP"]
+            metrics["command_source"] = "INVALID_DATA"
+            metrics["command_latched"] = False
         else:
             cmd = self._decide_command(t, overall_risk, top, metrics)
 
@@ -1285,9 +1477,14 @@ class RiskEvaluatorNode(Node):
                 if overall_risk < RELEASE_RISK_MAX:
                     cmd = str(self.get_parameter("cmd_hold").value)
                     metrics.setdefault("reason_codes", []).append("CAUTION_HOLD_LOW_RISK")
-                self._maybe_update_cmd(t, cmd, float(self.get_parameter("min_cmd_hold_s").value))
-                cmd = self.last_cmd
-                metrics["cmd"] = cmd
+                cmd = self._apply_desired_command_policy(
+                    t,
+                    cmd,
+                    float(overall_risk),
+                    float(self.get_parameter("min_cmd_hold_s").value),
+                    metrics,
+                    command_source="POLICY",
+                )
             else:
                 metrics["vision_mode"] = "NORMAL"
 
@@ -1296,6 +1493,8 @@ class RiskEvaluatorNode(Node):
         metrics["source"] = source
         metrics["mode"] = self.mode
         metrics["active_geometry_profile"] = str(self.get_parameter("geometry_profile_name").value)
+
+        cmd = self._finalize_raw_command_policy(t, cmd, float(overall_risk), metrics)
 
         self._last_published_risk = float(float(overall_risk))
         self.pub_risk.publish(Float32(data=float(overall_risk)))
@@ -1880,19 +2079,29 @@ class RiskEvaluatorNode(Node):
 
         if vq < vq_min:
             desired = cmd_slow if risk >= LOW_RISK_MAX else cmd_hold
-            self._maybe_update_cmd(t, desired, hold_s)
-            metrics["cmd"] = self.last_cmd
             metrics["vision_guard"] = "vq_below_vq_min"
             metrics["reason_codes"] = reason_codes + ["VQ_BELOW_MIN"]
             metrics["dominant_factor"] = self._dominant_factor(metrics.get("components", {}))
-            return self.last_cmd
+            return self._apply_desired_command_policy(
+                t,
+                desired,
+                risk,
+                hold_s,
+                metrics,
+                command_source="POLICY",
+            )
 
         if top is None:
-            self._maybe_update_cmd(t, cmd_hold, hold_s)
-            metrics["cmd"] = self.last_cmd
             metrics["reason_codes"] = reason_codes + ["NO_TARGET"]
             metrics["dominant_factor"] = "none"
-            return self.last_cmd
+            return self._apply_desired_command_policy(
+                t,
+                cmd_hold,
+                risk,
+                hold_s,
+                metrics,
+                command_source="POLICY",
+            )
 
         target_metrics = (
             metrics.get("target", {}) if isinstance(metrics.get("target", {}), dict) else {}
@@ -1946,10 +2155,13 @@ class RiskEvaluatorNode(Node):
         if risk >= risk_stop_th or emergency_vttc:
             desired = cmd_stop
             reason_codes.append("EMERGENCY_STOP")
+            command_source = "EMERGENCY_VTTC" if emergency_vttc else "EMERGENCY"
         elif (not self.avoid_mode) and risk < risk_slow_th and (not urgent_vttc):
             desired = cmd_hold
             reason_codes.append("CLEAR_TRACK")
+            command_source = "POLICY"
         else:
+            command_source = "POLICY"
             if situation == "DIVERGING" and risk < risk_turn_th and (not urgent_vttc):
                 desired = cmd_slow if risk >= risk_slow_th else cmd_hold
                 reason_codes.append("DIVERGING_NO_TURN")
@@ -1972,8 +2184,6 @@ class RiskEvaluatorNode(Node):
                 desired = cmd_slow
                 reason_codes.append("OFF_CORRIDOR_DEESCALATE")
 
-        self._maybe_update_cmd(t, desired, hold_s)
-        metrics["cmd"] = self.last_cmd
         metrics["decision"] = {
             "direction": direction,
             "very_close": bool(very_close),
@@ -1983,15 +2193,23 @@ class RiskEvaluatorNode(Node):
         }
         metrics["reason_codes"] = reason_codes
         metrics["dominant_factor"] = self._dominant_factor(metrics.get("components", {}))
-        return self.last_cmd
+        return self._apply_desired_command_policy(
+            t,
+            desired,
+            risk,
+            hold_s,
+            metrics,
+            command_source=command_source,
+        )
 
-    def _maybe_update_cmd(self, t: float, desired: str, hold_s: float) -> None:
+    def _maybe_update_cmd(self, t: float, desired: str, hold_s: float) -> bool:
         if desired == self.last_cmd:
-            return
+            return True
         if (t - self.last_cmd_time) < hold_s:
-            return
+            return False
         self.last_cmd = desired
         self.last_cmd_time = t
+        return True
 
     # --------------------------
     # Overlay helpers
@@ -2294,12 +2512,19 @@ class RiskEvaluatorNode(Node):
         accent = self._risk_color(risk)
 
         cmd_selected = _ascii_safe(
-            str(metrics.get("command_selected", metrics.get("cmd", "HOLD_COURSE"))).replace(
+            str(metrics.get("selected_command", metrics.get("cmd", "HOLD_COURSE"))).replace(
                 "_", " "
             )
         )
-        cmd_raw = _ascii_safe(str(metrics.get("command_raw", metrics.get("cmd", ""))).replace("_", " "))
-        cmd_safe = _ascii_safe(str(metrics.get("command_safe", "STALE")).replace("_", " "))
+        cmd_raw = _ascii_safe(
+            str(metrics.get("raw_command", metrics.get("cmd", ""))).replace("_", " ")
+        )
+        cmd_safe = _ascii_safe(
+            str(metrics.get("safe_command", "STALE")).replace("_", " ")
+        )
+        command_source = _ascii_safe(str(metrics.get("command_source", "UNKNOWN")))
+        command_latched = bool(metrics.get("command_latched", False))
+        command_policy_valid = bool(metrics.get("command_policy_valid", False))
         vq = float(metrics.get("vision_quality", 1.0))
         ntrk = int(metrics.get("num_tracks", 0))
         ca_active = bool(metrics.get("ca_active", metrics.get("avoid_active", False)))
@@ -2344,6 +2569,10 @@ class RiskEvaluatorNode(Node):
         lines: List[str] = []
         lines.append(f"CMD: {cmd_selected}   RAW: {cmd_raw}")
         lines.append(f"SAFE: {cmd_safe}   MGR: {mgr_state}")
+        lines.append(
+            f"CMD_SRC: {command_source}   LATCH: {'TRUE' if command_latched else 'FALSE'}   "
+            f"POLICY: {'OK' if command_policy_valid else 'VIOL'}"
+        )
         lines.append(
             f"MODE: {vmode}   CA_ACTIVE: {'TRUE' if ca_active else 'FALSE'}"
         )
