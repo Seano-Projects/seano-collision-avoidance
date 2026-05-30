@@ -64,6 +64,7 @@ from seano_vision.risk_policy import (
     command_is_avoidance,
     command_is_high_severity,
     normalize_command,
+    normalize_source,
 )
 
 try:
@@ -1516,19 +1517,28 @@ class RiskEvaluatorNode(Node):
 
             if self.mode == "CAUTION":
                 metrics["vision_mode"] = "CAUTION"
-                if cmd.startswith("TURN"):
-                    cmd = str(self.get_parameter("cmd_slow").value)
-                    metrics.setdefault("reason_codes", []).append("CAUTION_DEESCALATE_TURN")
-                if overall_risk < RELEASE_RISK_MAX:
-                    cmd = str(self.get_parameter("cmd_hold").value)
-                    metrics.setdefault("reason_codes", []).append("CAUTION_HOLD_LOW_RISK")
+                command_source = normalize_source(metrics.get("command_source", "POLICY"))
+                preserve_source = command_source in (
+                    "EMERGENCY",
+                    "EMERGENCY_VTTC",
+                    "FAILSAFE",
+                    "INVALID_DATA",
+                )
+                if not preserve_source:
+                    command_source = "POLICY"
+                    if cmd.startswith("TURN"):
+                        cmd = str(self.get_parameter("cmd_slow").value)
+                        metrics.setdefault("reason_codes", []).append("CAUTION_DEESCALATE_TURN")
+                    if overall_risk < RELEASE_RISK_MAX:
+                        cmd = str(self.get_parameter("cmd_hold").value)
+                        metrics.setdefault("reason_codes", []).append("CAUTION_HOLD_LOW_RISK")
                 cmd = self._apply_desired_command_policy(
                     t,
                     cmd,
                     float(overall_risk),
                     float(self.get_parameter("min_cmd_hold_s").value),
                     metrics,
-                    command_source="POLICY",
+                    command_source=command_source,
                 )
             else:
                 metrics["vision_mode"] = "NORMAL"
