@@ -61,6 +61,8 @@ from seano_vision.risk_policy import (
     classify_risk,
     clamp_command_for_risk,
     command_allowed_for_risk,
+    command_is_avoidance,
+    command_is_high_severity,
     normalize_command,
 )
 
@@ -1178,9 +1180,8 @@ class RiskEvaluatorNode(Node):
             metrics.setdefault("reason_codes", []).append(
                 f"POLICY_OUTPUT_CLAMP_{risk_class}_{original}_TO_{clamped}"
             )
-            if not (risk_class == "LOW" and latched):
-                self.last_cmd = clamped
-                self.last_cmd_time = t
+            self.last_cmd = clamped
+            self.last_cmd_time = t
 
         final_valid = command_allowed_for_risk(
             clamped,
@@ -1300,12 +1301,53 @@ class RiskEvaluatorNode(Node):
             selected_source = "WATCHDOG"
             selected_latched = False
 
+        raw_cmd_norm = normalize_command(raw_cmd_s)
+        safe_cmd_norm = normalize_command(safe_cmd_s if safe_valid else "")
+        preferred_selected_cmd = raw_cmd_norm if command_is_high_severity(raw_cmd_norm) else ""
+        if not preferred_selected_cmd and command_is_high_severity(safe_cmd_norm):
+            preferred_selected_cmd = safe_cmd_norm
+
+        selected_risk_class = classify_risk(risk_v)
+        current_avoidance_command = bool(
+            command_is_avoidance(raw_cmd_norm) or command_is_avoidance(safe_cmd_norm)
+        )
+        medium_hold_allowed = bool(
+            selected_latched
+            and selected_risk_class == "MEDIUM"
+            and self._is_hold_command(selected_cmd)
+            and not current_avoidance_command
+        )
+        selected_before_policy = str(selected_cmd)
+        selected_cmd, _selected_policy_input_valid, selected_risk_class = clamp_command_for_risk(
+            selected_cmd,
+            risk_v,
+            command_source=selected_source,
+            command_latched=selected_latched,
+            preferred_command=preferred_selected_cmd,
+            medium_hold_allowed=medium_hold_allowed,
+        )
+        selected_policy_clamped = normalize_command(selected_before_policy) != normalize_command(
+            selected_cmd
+        )
+
         selected_policy_valid = command_allowed_for_risk(
             selected_cmd,
             risk_v,
             command_source=selected_source,
             command_latched=selected_latched,
-        ) and watchdog_policy_valid
+            medium_hold_allowed=medium_hold_allowed,
+        )
+
+        command_active = not self._is_hold_command(selected_cmd)
+        ca_active = bool(
+            medium_or_high_risk
+            or command_active
+            or avoid_decision_active
+            or failsafe_active
+            or auto_enable
+            or takeover_active
+            or mode_mgr_avoid
+        )
 
         ages = {
             "safe_command": round(self._topic_age_s(self.safe_command_t, now_s), 3),
@@ -1320,7 +1362,7 @@ class RiskEvaluatorNode(Node):
         }
 
         metrics["risk_raw"] = float(risk_v)
-        metrics["risk_class"] = classify_risk(risk_v)
+        metrics["risk_class"] = selected_risk_class
         metrics["raw_command"] = raw_cmd_s
         metrics["safe_command"] = safe_cmd_s
         metrics["selected_command"] = selected_cmd
@@ -1332,6 +1374,9 @@ class RiskEvaluatorNode(Node):
         metrics["command_source"] = selected_source
         metrics["command_latched"] = bool(selected_latched)
         metrics["command_policy_valid"] = bool(selected_policy_valid)
+        metrics["command_policy_clamped"] = bool(
+            metrics.get("command_policy_clamped", False) or selected_policy_clamped
+        )
         metrics["watchdog_command_source"] = watchdog_source or "STALE"
         metrics["watchdog_command_latched"] = bool(watchdog_latched)
         metrics["watchdog_command_policy_valid"] = bool(watchdog_policy_valid)

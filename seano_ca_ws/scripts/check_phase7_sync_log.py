@@ -14,8 +14,11 @@ TOKEN_RE = re.compile(r"([a-zA-Z_][a-zA-Z0-9_]*)=([^ \n]+)")
 LOW_OK = {"", "HOLD_COURSE", "RC_OVERRIDE_RELEASE", "RELEASE"}
 MEDIUM_OK = {"SLOW_DOWN", "TURN_LEFT_SLOW", "TURN_RIGHT_SLOW"}
 HIGH_OK = {"STOP", "TURN_LEFT", "TURN_RIGHT"}
-LOW_EXCEPTION_SOURCES = {"FAILSAFE", "EMERGENCY", "EMERGENCY_VTTC", "RECOVERY"}
-MEDIUM_EXCEPTION_SOURCES = {"FAILSAFE", "EMERGENCY", "EMERGENCY_VTTC"}
+AVOIDANCE_COMMANDS = MEDIUM_OK | HIGH_OK
+RISK_BYPASS_SOURCES = {"FAILSAFE", "INVALID_DATA", "EMERGENCY", "EMERGENCY_VTTC"}
+LOW_EXCEPTION_SOURCES = RISK_BYPASS_SOURCES | {"RECOVERY"}
+MEDIUM_EXCEPTION_SOURCES = RISK_BYPASS_SOURCES
+HIGH_EXCEPTION_SOURCES = RISK_BYPASS_SOURCES
 RELEASE_STATES = {"RELEASE", "OVERRIDE_OFF", "PASSIVE"}
 
 
@@ -42,8 +45,9 @@ def check_record(lineno: int, row: Dict[str, str]) -> List[str]:
     findings: List[str] = []
     risk_class = str(row.get("risk_class", "UNKNOWN")).upper()
     cmd = normalize_command(row.get("selected_command", row.get("command_selected", "")))
+    raw_cmd = normalize_command(row.get("raw_command", row.get("command_raw", "")))
+    safe_cmd = normalize_command(row.get("safe_command", row.get("command_safe", "")))
     source = normalize_source(row.get("command_source", "UNKNOWN"))
-    latched = parse_bool(row.get("command_latched", "false"))
     policy_valid = parse_bool(row.get("command_policy_valid", "true"))
     avoid_active = parse_bool(row.get("avoid_active", "false"))
     ca_active = parse_bool(row.get("ca_active", str(avoid_active).lower()))
@@ -53,23 +57,38 @@ def check_record(lineno: int, row: Dict[str, str]) -> List[str]:
     override_state = normalize_source(row.get("override_state", "UNKNOWN"))
     manual_authority = parse_bool(row.get("operator_manual_authority", "false"))
     release_state = override_state in RELEASE_STATES or cmd in {"RC_OVERRIDE_RELEASE", "RELEASE"}
+    current_avoidance_command = raw_cmd in AVOIDANCE_COMMANDS or safe_cmd in AVOIDANCE_COMMANDS
+    current_high_command = raw_cmd if raw_cmd in HIGH_OK else safe_cmd if safe_cmd in HIGH_OK else ""
 
     if not policy_valid:
         findings.append(f"{lineno}: command_policy_valid=false for selected command {cmd}")
 
     if risk_class == "LOW" and cmd not in LOW_OK:
-        if not (latched or source in LOW_EXCEPTION_SOURCES):
+        if source not in LOW_EXCEPTION_SOURCES:
             findings.append(
                 f"{lineno}: LOW risk selected non-release command {cmd} "
-                f"without latch/exception source={source}"
+                f"without explicit exception source={source}"
             )
 
-    if risk_class == "MEDIUM" and cmd in HIGH_OK:
+    if risk_class == "MEDIUM" and cmd not in MEDIUM_OK:
         if source not in MEDIUM_EXCEPTION_SOURCES:
-            findings.append(f"{lineno}: MEDIUM risk selected non-medium command {cmd}")
+            if not (cmd in LOW_OK and not current_avoidance_command):
+                findings.append(f"{lineno}: MEDIUM risk selected non-medium command {cmd}")
+
+    if risk_class == "HIGH" and cmd not in HIGH_OK:
+        if source not in HIGH_EXCEPTION_SOURCES:
+            if cmd in LOW_OK and (manual_authority or release_state) and not current_high_command:
+                pass
+            elif current_high_command:
+                findings.append(
+                    f"{lineno}: HIGH risk selected {cmd} while raw/safe high command "
+                    f"is {current_high_command}"
+                )
+            elif not (cmd in LOW_OK and not (ca_active or takeover_active)):
+                findings.append(f"{lineno}: HIGH risk selected non-high command {cmd}")
 
     if risk_class == "HIGH" and cmd in LOW_OK and (ca_active or takeover_active):
-        if not (manual_authority or release_state):
+        if source not in HIGH_EXCEPTION_SOURCES and not (manual_authority or release_state):
             findings.append(
                 f"{lineno}: HIGH risk selected HOLD/RELEASE while CA active/takeover true"
             )
