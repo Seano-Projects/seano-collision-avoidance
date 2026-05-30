@@ -54,3 +54,6 @@ way.txt
 
 # Phase 7 local runtime PID files
 seano_ca_ws/.phase7_runtime/
+
+# Phase 7 generated run evidence
+seano_ca_ws/evidence_phase7/auto_runs/
