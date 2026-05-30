@@ -263,20 +263,49 @@ wait_for_pretty_logger() {
 write_detector_crash_check() {
   local terminal_log="$1"
   local output_file="$2"
-  local pattern
+  local fatal_pattern
+  local exit1_pattern
+  local fatal_found=0
+  local exit1_found=0
 
-  pattern='detector_node.*process has died|exit code -11|segmentation|NvMapMemAlloc|CUDA initialization failure|out of memory'
+  fatal_pattern='exit code -11|segmentation|NvMapMemAlloc|CUDA initialization failure|out of memory'
+  exit1_pattern='detector_node.*process has died.*exit code 1|process has died.*detector_node.*exit code 1|exit code 1.*detector_node'
 
   {
     echo "Detector crash pattern scan"
     echo "log: $terminal_log"
-    echo "patterns: $pattern"
+    echo "fatal_patterns: $fatal_pattern"
+    echo "exit_code_1_warning_pattern: $exit1_pattern"
     echo
-    if grep -E -i "$pattern" "$terminal_log"; then
-      echo
-      echo "RESULT: matching crash/error patterns found"
+
+    echo "Fatal detector failure matches:"
+    if grep -E -i "$fatal_pattern" "$terminal_log"; then
+      fatal_found=1
     else
-      echo "RESULT: no detector crash patterns found"
+      echo "(none)"
+    fi
+
+    echo
+    echo "Detector exit-code-1 warning matches:"
+    if grep -E -i "$exit1_pattern" "$terminal_log"; then
+      exit1_found=1
+    else
+      echo "(none)"
+    fi
+
+    echo
+    if [ "$fatal_found" -eq 1 ]; then
+      echo "RESULT: fatal detector crash patterns found"
+    else
+      echo "RESULT: no fatal detector crash patterns found"
+    fi
+
+    if [ "$exit1_found" -eq 1 ]; then
+      echo
+      echo "WARN: detector exit code 1 observed; inspect timing/shutdown context"
+    else
+      echo
+      echo "WARN: no detector exit code 1 warning patterns found"
     fi
   } > "$output_file" 2>&1 || true
 }
