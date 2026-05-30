@@ -13,6 +13,9 @@ TERMINAL_LOG="$RUN_EVIDENCE_DIR/terminal_log.txt"
 PRETTY_LOG="$RUN_EVIDENCE_DIR/terminal_pretty_view.txt"
 TEGRA_LOG="$RUN_EVIDENCE_DIR/tegrastats_raw.txt"
 RAW_PIPE="$RUN_DIR/terminal_raw.pipe"
+LOCAL_RUNTIME_ENV="$WS_DIR/.phase7_runtime/local_runtime.env"
+CA_DET_MODEL_PATH="${PHASE7_CA_DET_MODEL_PATH:-yolov8n.pt}"
+LOCAL_RUNTIME_ENV_LOADED="false"
 
 mkdir -p "$RUN_DIR" "$RUN_EVIDENCE_DIR"
 cd "$WS_DIR"
@@ -47,6 +50,47 @@ log_run() {
   printf '%s\n' "$*" | tee -a "$TERMINAL_LOG" "$PRETTY_LOG"
 }
 
+load_local_runtime_env() {
+  local line
+  local key_value
+  local value
+
+  if [ ! -f "$LOCAL_RUNTIME_ENV" ]; then
+    CA_DET_MODEL_PATH="${PHASE7_CA_DET_MODEL_PATH:-yolov8n.pt}"
+    return 0
+  fi
+
+  LOCAL_RUNTIME_ENV_LOADED="true"
+
+  while IFS= read -r line || [ -n "$line" ]; do
+    case "$line" in
+      ""|\#*) continue ;;
+      export\ PHASE7_CA_DET_MODEL_PATH=*|PHASE7_CA_DET_MODEL_PATH=*)
+        key_value="${line#export }"
+        value="${key_value#PHASE7_CA_DET_MODEL_PATH=}"
+        case "$value" in
+          \"*\") value="${value#\"}"; value="${value%\"}" ;;
+          \'*\') value="${value#\'}"; value="${value%\'}" ;;
+        esac
+        PHASE7_CA_DET_MODEL_PATH="$value"
+        ;;
+      *)
+        log_run "[WARN] ignoring unsupported local_runtime.env line: ${line%%=*}"
+        ;;
+    esac
+  done < "$LOCAL_RUNTIME_ENV"
+
+  CA_DET_MODEL_PATH="${PHASE7_CA_DET_MODEL_PATH:-yolov8n.pt}"
+}
+
+load_local_runtime_env
+
+{
+  echo "ca_det_model_path,$CA_DET_MODEL_PATH"
+  echo "local_runtime_env,$LOCAL_RUNTIME_ENV"
+  echo "local_runtime_env_loaded,$LOCAL_RUNTIME_ENV_LOADED"
+} >> "$RUN_EVIDENCE_DIR/scenario_info.csv"
+
 source /opt/ros/humble/setup.bash
 source install/setup.bash
 
@@ -68,6 +112,10 @@ trap cleanup INT TERM EXIT
 
 log_run "[RUN] evidence_dir=$RUN_EVIDENCE_DIR"
 log_run "[RUN] ROS_DOMAIN_ID=$ROS_DOMAIN_ID"
+log_run "[RUN] ca_det_model_path=$CA_DET_MODEL_PATH"
+if [ "$LOCAL_RUNTIME_ENV_LOADED" = "true" ]; then
+  log_run "[RUN] local_runtime_env=$LOCAL_RUNTIME_ENV"
+fi
 
 if command -v tegrastats >/dev/null 2>&1; then
   tegrastats --interval 1000 > "$TEGRA_LOG" 2>&1 &
@@ -112,6 +160,7 @@ setsid ros2 launch seano_vision phase7_cuav_usb_hardware.launch.py \
   master_enable_on_start:=true \
   actuator_interface_confirmed:=true \
   ca_runtime_profile:=usb_watchdog \
+  ca_det_model_path:="$CA_DET_MODEL_PATH" \
   ca_det_publish_annotated:=false \
   use_event_logger:=false > "$RAW_PIPE" 2>&1 &
 
