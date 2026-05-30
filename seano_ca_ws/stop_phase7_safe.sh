@@ -67,6 +67,98 @@ wait_until_stopped() {
   return 1
 }
 
+pid_is_tegrastats() {
+  local pid="$1"
+  local comm
+  local cmd
+  local cmd0
+  local cmd0_base
+
+  comm="$(cat "/proc/$pid/comm" 2>/dev/null)"
+  cmd="$(ps -p "$pid" -o command= 2>/dev/null)"
+  cmd0="${cmd%% *}"
+  cmd0_base="${cmd0##*/}"
+
+  case "$comm" in
+    tegrastats) return 0 ;;
+  esac
+
+  case "$cmd0_base" in
+    tegrastats) return 0 ;;
+  esac
+
+  return 1
+}
+
+pid_has_phase7_tegrastats_fd() {
+  local pid="$1"
+  local fd
+  local target
+
+  for fd in "/proc/$pid/fd/"*; do
+    target="$(readlink "$fd" 2>/dev/null)" || continue
+    case "$target" in
+      *evidence_phase7/auto_runs/*tegrastats_raw.txt*) return 0 ;;
+    esac
+  done
+
+  return 1
+}
+
+stop_tegrastats_from_pidfile() {
+  local pidfile="$RUN_DIR/tegrastats.pid"
+  local pid
+
+  if [ ! -f "$pidfile" ]; then
+    echo "[INFO] no PID file for tegrastats: $pidfile"
+    return 0
+  fi
+
+  pid="$(cat "$pidfile" 2>/dev/null | tr -cd '0-9')"
+
+  if [ -z "$pid" ]; then
+    echo "[WARN] invalid PID file for tegrastats: $pidfile"
+    return 1
+  fi
+
+  if ! pid_alive "$pid"; then
+    echo "[INFO] tegrastats PID $pid is not running"
+    rm -f "$pidfile"
+    return 0
+  fi
+
+  if ! pid_is_tegrastats "$pid"; then
+    echo "[WARN] refusing to stop PID $pid from tegrastats pidfile; process is not tegrastats"
+    echo "[WARN] command: $(ps -p "$pid" -o command= 2>/dev/null)"
+    return 1
+  fi
+
+  if ! pid_has_phase7_tegrastats_fd "$pid"; then
+    echo "[WARN] refusing to stop tegrastats PID $pid; no FD points to Phase 7 tegrastats_raw.txt"
+    return 1
+  fi
+
+  echo "[INFO] stopping tegrastats PID=$pid"
+  echo "[INFO] sending SIGTERM to tegrastats"
+  kill -TERM -- "$pid" 2>/dev/null || true
+  wait_until_stopped "$pid" 5 && {
+    rm -f "$pidfile"
+    echo "[OK] tegrastats stopped with SIGTERM"
+    return 0
+  }
+
+  echo "[WARN] tegrastats did not stop gracefully; sending SIGKILL only to recorded PID=$pid"
+  kill -KILL -- "$pid" 2>/dev/null || true
+  wait_until_stopped "$pid" 3 && {
+    rm -f "$pidfile"
+    echo "[OK] tegrastats stopped with SIGKILL"
+    return 0
+  }
+
+  echo "[WARN] tegrastats PID $pid is still running; leaving pidfile for manual inspection"
+  return 1
+}
+
 stop_from_pidfile() {
   local pidfile="$1"
   local label="$2"
@@ -237,7 +329,7 @@ echo "[INFO] workspace: $WS_DIR"
 
 stop_from_pidfile "$RUN_DIR/phase7_launch.pid" "phase7 launch" "phase7_cuav_usb_hardware.launch.py"
 stop_from_pidfile "$RUN_DIR/web_video_server.pid" "web video server" "web_video_server"
-stop_from_pidfile "$RUN_DIR/tegrastats.pid" "tegrastats" "tegrastats"
+stop_tegrastats_from_pidfile
 wait_for_pretty_logger
 finalize_last_run
 

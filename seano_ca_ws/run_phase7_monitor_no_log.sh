@@ -99,7 +99,7 @@ rm -f "$RAW_PIPE"
 mkfifo "$RAW_PIPE"
 
 tee -a "$TERMINAL_LOG" < "$RAW_PIPE" \
-  | python3 -u "$WS_DIR/scripts/phase7_pretty_live.py" \
+  | PHASE7_TEGRASTATS_RAW="$TEGRA_LOG" python3 -u "$WS_DIR/scripts/phase7_pretty_live.py" \
   | tee -a "$PRETTY_LOG" &
 PRETTY_PID=$!
 echo "$PRETTY_PID" > "$RUN_DIR/pretty_live.pid"
