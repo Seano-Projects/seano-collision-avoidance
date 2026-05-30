@@ -39,6 +39,8 @@ from seano_vision.risk_policy import (
     RELEASE_RISK_MAX,
     clamp_command_for_risk,
     command_allowed_for_risk,
+    command_is_avoidance,
+    command_is_high_severity,
     normalize_command,
 )
 
@@ -732,17 +734,29 @@ class WatchdogFailsafeNode(Node):
                 command_latched = True
 
         cmd_before_policy = str(cmd_safe)
+        preferred_cmd = cmd_in if command_is_high_severity(cmd_in) else ""
+        current_avoidance_command = bool(
+            command_is_avoidance(cmd_in) or command_is_avoidance(cmd_before_policy)
+        )
+        medium_hold_allowed = bool(
+            command_latched
+            and self._is_clearish_cmd(cmd_before_policy)
+            and not current_avoidance_command
+        )
         cmd_safe, command_policy_input_valid, risk_class = clamp_command_for_risk(
             cmd_safe,
             self.risk,
             command_source=command_source,
             command_latched=command_latched,
+            preferred_command=preferred_cmd,
+            medium_hold_allowed=medium_hold_allowed,
         )
         command_policy_valid = command_allowed_for_risk(
             cmd_safe,
             self.risk,
             command_source=command_source,
             command_latched=command_latched,
+            medium_hold_allowed=medium_hold_allowed,
         )
         command_policy_clamped = normalize_command(cmd_before_policy) != normalize_command(cmd_safe)
         if command_policy_clamped:

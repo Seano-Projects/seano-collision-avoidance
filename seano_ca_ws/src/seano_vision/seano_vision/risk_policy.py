@@ -24,7 +24,7 @@ AVOIDANCE_COMMANDS = MEDIUM_COMMANDS | HIGH_COMMANDS
 
 EMERGENCY_SOURCES = {"EMERGENCY", "EMERGENCY_VTTC"}
 FAILSAFE_SOURCES = {"FAILSAFE", "INVALID_DATA"}
-LOW_LATCH_SOURCES = {"LATCHED", "RECOVERY"}
+LOW_LATCH_SOURCES = {"RECOVERY"}
 BYPASS_SOURCES = EMERGENCY_SOURCES | FAILSAFE_SOURCES
 
 
@@ -59,7 +59,15 @@ def source_allows_policy_bypass(command_source: str) -> bool:
 
 def source_allows_low_latch(command_source: str, command_latched: bool = False) -> bool:
     source = normalize_source(command_source)
-    return bool(command_latched) or source in LOW_LATCH_SOURCES
+    return source in LOW_LATCH_SOURCES
+
+
+def command_is_avoidance(command: str) -> bool:
+    return normalize_command(command) in AVOIDANCE_COMMANDS
+
+
+def command_is_high_severity(command: str) -> bool:
+    return normalize_command(command) in HIGH_COMMANDS
 
 
 def command_allowed_for_risk_class(
@@ -67,6 +75,7 @@ def command_allowed_for_risk_class(
     risk_class: str,
     command_source: str = "POLICY",
     command_latched: bool = False,
+    medium_hold_allowed: bool = False,
 ) -> bool:
     cmd = normalize_command(command)
     risk_band = str(risk_class or "UNKNOWN").strip().upper()
@@ -83,7 +92,7 @@ def command_allowed_for_risk_class(
         )
 
     if risk_band == "MEDIUM":
-        return cmd in MEDIUM_COMMANDS
+        return cmd in MEDIUM_COMMANDS or (bool(medium_hold_allowed) and cmd in LOW_COMMANDS)
 
     if risk_band == "HIGH":
         return cmd in HIGH_COMMANDS
@@ -96,12 +105,14 @@ def command_allowed_for_risk(
     risk: float,
     command_source: str = "POLICY",
     command_latched: bool = False,
+    medium_hold_allowed: bool = False,
 ) -> bool:
     return command_allowed_for_risk_class(
         command=command,
         risk_class=classify_risk(risk),
         command_source=command_source,
         command_latched=command_latched,
+        medium_hold_allowed=medium_hold_allowed,
     )
 
 
@@ -110,6 +121,8 @@ def clamp_command_for_risk(
     risk: float,
     command_source: str = "POLICY",
     command_latched: bool = False,
+    preferred_command: str = "",
+    medium_hold_allowed: bool = False,
 ) -> tuple[str, bool, str]:
     """Return command clamped to the Phase 7 operator risk-band policy.
 
@@ -117,9 +130,16 @@ def clamp_command_for_risk(
     the supplied risk/source/latch state.
     """
     cmd = normalize_command(command) or CMD_HOLD
+    preferred = normalize_command(preferred_command)
     risk_class = classify_risk(risk)
 
-    if command_allowed_for_risk_class(cmd, risk_class, command_source, command_latched):
+    if command_allowed_for_risk_class(
+        cmd,
+        risk_class,
+        command_source,
+        command_latched,
+        medium_hold_allowed=medium_hold_allowed,
+    ):
         return cmd, True, risk_class
 
     if source_allows_policy_bypass(command_source):
@@ -136,6 +156,8 @@ def clamp_command_for_risk(
         return CMD_SLOW, False, risk_class
 
     if risk_class == "HIGH":
+        if preferred in HIGH_COMMANDS:
+            return preferred, False, risk_class
         if cmd == CMD_TURN_LEFT_SLOW:
             return CMD_TURN_LEFT, False, risk_class
         if cmd == CMD_TURN_RIGHT_SLOW:
