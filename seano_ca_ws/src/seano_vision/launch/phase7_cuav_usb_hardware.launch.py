@@ -804,7 +804,7 @@ def generate_launch_description():
         DeclareLaunchArgument("ca_det_class_ids", default_value="ALL"),
         DeclareLaunchArgument("ca_det_max_det", default_value="50"),
         DeclareLaunchArgument("ca_det_agnostic_nms", default_value="false"),
-        DeclareLaunchArgument("ca_det_half", default_value="false"),
+        DeclareLaunchArgument("ca_det_half", default_value="true"),
         DeclareLaunchArgument("ca_det_warmup", default_value="true"),
         DeclareLaunchArgument("ca_det_max_fps", default_value="8.0"),
         DeclareLaunchArgument("ca_det_publish_annotated", default_value="true"),

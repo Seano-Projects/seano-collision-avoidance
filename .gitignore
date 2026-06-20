@@ -56,4 +56,10 @@ way.txt
 seano_ca_ws/.phase7_runtime/
 
 # Phase 7 generated run evidence
-seano_ca_ws/evidence_phase7/auto_runs/
+seano_ca_ws/evidence_phase7/
+
+# Scratch run markers / backup files / ad-hoc archives
+seano_ca_ws/.last_*_dir
+*.bak_engine_*
+free_before.txt
+*.zip

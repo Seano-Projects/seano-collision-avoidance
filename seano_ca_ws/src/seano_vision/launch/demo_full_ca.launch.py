@@ -435,10 +435,10 @@ def generate_launch_description():
         output="screen",
         condition=IfCondition(use_risk),
         parameters=[
+            PathJoinSubstitution(
+                [FindPackageShare("seano_vision"), "config", "alfin7_hardware_light.yaml"]
+            ),
             {
-                "bottom_danger_ratio": 0.45,
-                "center_band_ratio": 0.35,
-                "camera_hfov_deg": 67.5,
                 "detections_topic": effective_detections_for_risk_topic,
                 "image_topic": image_topic,
                 "risk_topic": risk_topic,
@@ -452,6 +452,7 @@ def generate_launch_description():
                 "use_freeze_detector": ParameterValue(use_freeze, value_type=bool),
                 "freeze_topic": freeze_topic,
                 "freeze_reason_topic": freeze_reason_topic,
+                "hud_state_timeout_s": 0.0,
             },
         ],
     )

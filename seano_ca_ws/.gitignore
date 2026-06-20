@@ -1,0 +1,14 @@
+
+# Local model export artifacts
+seano_ca_ws/src/seano_vision/models/*.engine
+seano_ca_ws/src/seano_vision/models/*.onnx
+src/seano_vision/models/*.engine
+src/seano_vision/models/*.onnx
+
+# Local TensorRT export artifacts
+src/seano_vision/models/*.engine
+src/seano_vision/models/*.onnx
+
+# Export staging directory (intermediate onnx/engine/pt files)
+src/seano_vision/models/_export_artifacts/
+seano_ca_ws/src/seano_vision/models/_export_artifacts/

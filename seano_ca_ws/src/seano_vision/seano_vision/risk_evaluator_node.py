@@ -233,7 +233,7 @@ class RiskEvaluatorNode(Node):
         self.declare_parameter(
             "interface_status_topic", "/seano/fcu_actuator_interface_status"
         )
-        self.declare_parameter("hud_state_timeout_s", 1.0)
+        self.declare_parameter("hud_state_timeout_s", 0.0)
 
         self.declare_parameter("publish_debug_image", True)
         self.declare_parameter("min_det_score", 0.35)
@@ -351,6 +351,14 @@ class RiskEvaluatorNode(Node):
         self.declare_parameter("image_timeout_s", 2.0)
         self.declare_parameter("lost_dark_vq", 0.25)
         self.declare_parameter("lost_dark_freeze_hold_s", 1.2)
+        # Fallback path: dark + low VQ sustained even WITHOUT a confirmed
+        # freeze (hash-repeat) flag. Frame freeze detection requires
+        # byte-identical consecutive frames; a noisy low-light feed almost
+        # never satisfies that, so without this fallback the system can
+        # remain stuck in CAUTION indefinitely during sustained darkness.
+        # Longer than lost_dark_freeze_hold_s because freeze=True is a
+        # stronger, more certain signal than VQ alone.
+        self.declare_parameter("lost_dark_no_freeze_hold_s", 4.0)
 
         self.declare_parameter("lost_min_hold_s", 1.0)
         self.declare_parameter("recover_vq", 0.55)
@@ -1621,6 +1629,9 @@ class RiskEvaluatorNode(Node):
 
         lost_dark_vq = float(self.get_parameter("lost_dark_vq").value)
         lost_dark_hold = float(self.get_parameter("lost_dark_freeze_hold_s").value)
+        lost_dark_no_freeze_hold = float(
+            self.get_parameter("lost_dark_no_freeze_hold_s").value
+        )
 
         lost_min_hold = float(self.get_parameter("lost_min_hold_s").value)
         recover_vq = float(self.get_parameter("recover_vq").value)
@@ -1636,11 +1647,17 @@ class RiskEvaluatorNode(Node):
         if freeze_timeout and img_age >= image_timeout_s * 0.7:
             lost_trigger = True
 
-        dark_freeze = (freeze is True) and (vq <= lost_dark_vq) and (not freeze_timeout)
-        if dark_freeze:
+        # Dark + frame genuinely frozen (hash-repeat confirmed) -> short hold.
+        # Dark but still noisy/non-repeat (freeze detector never fires on a
+        # noisy low-light feed) -> independent path with a longer, separately
+        # tunable hold, so sustained darkness cannot stay in CAUTION forever
+        # just because consecutive frames are never byte-identical.
+        dark_low_vq = (vq <= lost_dark_vq) and (not freeze_timeout)
+        if dark_low_vq:
             if self.dark_freeze_since <= 0.0:
                 self.dark_freeze_since = t
-            if (t - self.dark_freeze_since) >= lost_dark_hold:
+            required_hold = lost_dark_hold if (freeze is True) else lost_dark_no_freeze_hold
+            if (t - self.dark_freeze_since) >= required_hold:
                 lost_trigger = True
         else:
             self.dark_freeze_since = 0.0
@@ -2133,6 +2150,48 @@ class RiskEvaluatorNode(Node):
         metrics["decision_gate"] = decision_gate
 
         if vq < vq_min:
+            # VQ_BELOW_MIN must not silently disable an imminent-collision
+            # stop. vTTC is derived from bounding-box area growth rate
+            # (geometric closing-rate proxy), not from image sharpness or
+            # brightness, so it remains a meaningful safety signal even when
+            # vision quality has degraded. We only check the emergency
+            # branch here (not the full directional/turn-bias logic below),
+            # because turn-direction selection genuinely needs more reliable
+            # bearing/geometry than a degraded frame can offer.
+            emergency_vttc_guard = False
+            if top is not None:
+                target_metrics_guard = (
+                    metrics.get("target", {})
+                    if isinstance(metrics.get("target", {}), dict)
+                    else {}
+                )
+                vttc_guard = target_metrics_guard.get("vttc_s", None)
+                vttc_stop_th_guard = float(
+                    self.get_parameter("vttc_stop_threshold_s").value
+                )
+                emergency_vttc_guard = (vttc_guard is not None) and (
+                    float(vttc_guard) <= vttc_stop_th_guard
+                )
+
+            if emergency_vttc_guard:
+                desired = cmd_stop
+                metrics["vision_guard"] = "vq_below_vq_min_emergency_vttc_override"
+                metrics["reason_codes"] = reason_codes + [
+                    "VQ_BELOW_MIN",
+                    "VTTC_EMERGENCY",
+                ]
+                metrics["dominant_factor"] = self._dominant_factor(
+                    metrics.get("components", {})
+                )
+                return self._apply_desired_command_policy(
+                    t,
+                    desired,
+                    risk,
+                    hold_s,
+                    metrics,
+                    command_source="EMERGENCY_VTTC",
+                )
+
             desired = cmd_slow if risk >= LOW_RISK_MAX else cmd_hold
             metrics["vision_guard"] = "vq_below_vq_min"
             metrics["reason_codes"] = reason_codes + ["VQ_BELOW_MIN"]
