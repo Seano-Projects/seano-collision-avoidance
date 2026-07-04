@@ -23,6 +23,14 @@ hanya mengamati dan mencatat, tidak mengendalikan thruster.
 - Repo ini juga **tidak menjalankan instance MAVROS baru** (`use_mavros:=false`)
   — MAVROS yang dipakai adalah `mavros.service` milik sistem/rekan yang sudah
   berjalan.
+- Script ini **tidak mengoverride `ca_runtime_profile`**, sehingga memakai
+  default launch file, yaitu profile **`usb_watchdog`** (profile
+  default/current) — **bukan** profile `full`. Konsekuensinya, lima node
+  perception/safety opsional (`vision_quality_node`, `false_positive_guard_node`,
+  `frame_freeze_detector_node`, `multi_target_fusion_node`,
+  `waterline_horizon_node`) **tidak ikut berjalan** pada skema ini. Detail node
+  mana yang aktif vs optional ada di
+  [REPO_MAP.md](REPO_MAP.md) §4–§5.
 
 ## 3. Command utama
 
@@ -61,6 +69,16 @@ Script mengecek hal berikut sebelum benar-benar menjalankan pipeline:
 Catatan: pengecekan `armed` tidak otomatis di dalam script (script ini tidak
 mengubah/membaca status arm secara langsung) — pastikan status arm sesuai
 prosedur operator Anda sebelum menjalankan script.
+
+Catatan `ca_mode`/`LOST_PERCEPTION`: pada skema ini, mode `LOST_PERCEPTION`
+dan failsafe kualitas kamera dihasilkan oleh **`risk_evaluator_node.py`**
+(vision-quality dihitung internal di dalam node itu sendiri) dan
+**`watchdog_failsafe_node.py`** (staleness check image/risk/mode) — **bukan**
+oleh node `vision_quality_node.py` eksternal, karena node itu bagian dari
+profile `full` dan tidak berjalan di sini (lihat [REPO_MAP.md](REPO_MAP.md) §5).
+Jadi kalau `ca_mode=LOST_PERCEPTION` muncul, penyebabnya ada di kualitas
+gambar/staleness yang dibaca langsung oleh kedua node itu, bukan indikasi
+node eksternal yang mati.
 
 ## 6. Kriteria abort
 
