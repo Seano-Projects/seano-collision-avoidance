@@ -46,6 +46,18 @@ SRC_W = 14
 SYNC_HEADER_INTERVAL = 20
 DEFAULT_SYS_PERIOD_S = 5.0
 
+# Legend for the abbreviated sync-table columns. BLK mirrors the
+# override_blocked diagnostic field from /ca/metrics; it is not a fault
+# status, only an internal signal about whether the RC-override bridge is
+# currently withholding output (e.g. manual authority active, interface not
+# yet confirmed). See PRD.md section 11 / AGENTS.md section 17.
+SYNC_LEGEND = (
+    "legend: LT=command_latched OK=command_policy_valid AUTO=auto_enable "
+    "AVOID=avoid_active TAKE=takeover_active OVR=override_active "
+    "BLK=override_blocked(diagnostic only, not a fault status) "
+    "MAN=operator_manual_authority"
+)
+
 
 class PrettyState:
     def __init__(self) -> None:
@@ -121,6 +133,7 @@ def render_phase7_sync(line: str, state: PrettyState) -> List[str]:
     out: List[str] = []
     if state.sync_count > 1 and (state.sync_count - 1) % SYNC_HEADER_INTERVAL == 0:
         out.append(sync_header())
+        out.append(SYNC_LEGEND)
 
     raw = get(row, "raw_command", get(row, "command_raw"))
     safe = get(row, "safe_command", get(row, "command_safe"))
@@ -412,6 +425,7 @@ def main(lines: Iterable[str]) -> int:
     configure_stdout()
     state = PrettyState()
     print(sync_header(), flush=True)
+    print(SYNC_LEGEND, flush=True)
 
     for line in lines:
         for rendered in render_line(line, state):

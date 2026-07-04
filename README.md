@@ -4,6 +4,19 @@ Sistem collision avoidance berbasis vision (kamera) untuk USV (Unmanned Surface 
 
 Platform: Jetson Orin | ROS2 Humble | YOLOv8 | ArduRover/ArduPilot (MAVLink/MAVROS)
 
+## Quick Start (skema pengujian pool — jalur kontrol eksisting)
+
+Script pengujian yang dipakai sekarang:
+
+```bash
+cd seano_ca_ws
+./run_pool_existing_control_path.sh
+```
+
+- **Jangan** pakai `run_phase7_monitor_no_log.sh` untuk skema existing-control-path KTI — script itu untuk skema lama di mana repo ini yang mengendalikan aktuator lewat bridge-nya sendiri.
+- Cara stop: **Ctrl+C** di terminal yang menjalankan script.
+- Dokumentasi detail: [docs/REPO_MAP.md](docs/REPO_MAP.md) (peta struktur repo) dan [docs/RUNBOOK_POOL_EXISTING_CONTROL_PATH.md](docs/RUNBOOK_POOL_EXISTING_CONTROL_PATH.md) (prosedur lengkap, preflight, kriteria abort).
+
 ## Dokumentasi
 
 Proyek ini sudah punya dokumentasi yang cukup lengkap di beberapa file terpisah:

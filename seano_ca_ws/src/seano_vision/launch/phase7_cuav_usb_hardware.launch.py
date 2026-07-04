@@ -114,6 +114,7 @@ def generate_launch_description():
     use_ca_pipeline = LaunchConfiguration("use_ca_pipeline")
     use_takeover_manager = LaunchConfiguration("use_takeover_manager")
     use_mode_manager = LaunchConfiguration("use_mode_manager")
+    use_rc_override_bridge = LaunchConfiguration("use_rc_override_bridge")
 
     master_enable_on_start = LaunchConfiguration("master_enable_on_start")
     failsafe_stale_is_active = LaunchConfiguration("failsafe_stale_is_active")
@@ -457,7 +458,7 @@ def generate_launch_description():
         executable="mavros_rc_override_bridge_node",
         name="mavros_rc_override_bridge_node",
         output="screen",
-        condition=IfCondition(use_ca_pipeline),
+        condition=IfCondition(_all_true(use_ca_pipeline, use_rc_override_bridge)),
         parameters=[
             {
                 "input_mode": input_mode,
@@ -586,7 +587,11 @@ def generate_launch_description():
                 "limiter_reason_topic": "/seano/limiter_reason",
                 "mavros_rc_override_topic": "/mavros/rc/override",
                 "frame_max_age_s": ParameterValue(event_frame_max_age_s, value_type=float),
-                "save_frames": True,
+                # No save_frames override here: defer to event_logger_node's own
+                # default (False) per PRD.md section 10 / AGENTS.md section 16 -
+                # KTI data collection should default to numeric metrics, not
+                # image snapshots. Pass save_frames:=true explicitly at launch
+                # time if visual evidence is specifically requested.
             }
         ],
     )
@@ -662,6 +667,15 @@ def generate_launch_description():
         DeclareLaunchArgument("use_ca_pipeline", default_value="true"),
         DeclareLaunchArgument("use_takeover_manager", default_value="true"),
         DeclareLaunchArgument("use_mode_manager", default_value="true"),
+        DeclareLaunchArgument(
+            "use_rc_override_bridge",
+            default_value="true",
+            description=(
+                "Launch mavros_rc_override_bridge_node. Set false for "
+                "logger/internal-pipeline checks that must not publish to "
+                "/mavros/rc/override."
+            ),
+        ),
         # MAVROS
         DeclareLaunchArgument("mavros_namespace", default_value="mavros"),
         DeclareLaunchArgument(

@@ -36,6 +36,7 @@ from rclpy.node import Node
 from rclpy.qos import DurabilityPolicy, HistoryPolicy, QoSProfile, ReliabilityPolicy
 from sensor_msgs.msg import Image
 from std_msgs.msg import Bool, Float32, String
+from vision_msgs.msg import Detection2DArray
 
 try:
     from mavros_msgs.msg import OverrideRCIn, State as MavrosState
@@ -45,6 +46,35 @@ except Exception:
     OverrideRCIn = None
     MavrosState = None
     HAS_MAVROS = False
+
+# Maps risk_evaluator_node's internal /ca/metrics["components"] keys to the
+# KTI-facing five risk-factor names requested by PRD.md section 8.1.
+DOMINANT_FACTOR_MAP = {
+    "prox": "proximity",
+    "center": "centrality",
+    "approach": "approach",
+    "bconst": "bearing_consistency",
+    "ttc_score": "vttc_score",
+}
+
+
+def dominant_factor_from_components(components: Dict[str, Any]) -> str:
+    """Read-only re-derivation of risk_evaluator_node's dominant-factor pick.
+
+    Used only as a logging fallback when /ca/metrics does not already include
+    a "dominant_factor" key; does not feed back into any control decision.
+    """
+    best_key = None
+    best_val = -1.0
+    for key in ("prox", "center", "approach", "bconst", "ttc_score"):
+        try:
+            val = float(components.get(key, -1.0))
+        except Exception:
+            continue
+        if val > best_val:
+            best_val = val
+            best_key = key
+    return DOMINANT_FACTOR_MAP.get(best_key or "", "")
 
 EVENT_FIELDS = [
     "seq",
@@ -117,6 +147,22 @@ CYCLE_FIELDS = [
     "frame_events_saved",
     "frame_events_failed",
     "notes",
+    # --- additive KTI response-time fields (PRD.md section 8.4) ---
+    "first_detection_time_sec",
+    "takeover_start_time_sec",
+    "auto_enable_time_sec",
+    "rc_override_enable_time_sec",
+    "first_actuator_output_time_sec",
+    "cycle_end_time_sec",
+    "detection_to_risk_s",
+    "risk_to_command_s",
+    "command_to_takeover_s",
+    "command_to_auto_enable_s",
+    "command_to_rc_override_s",
+    "command_to_actuator_s",
+    "detection_to_actuator_s",
+    "avoid_duration_s",
+    "total_avoidance_cycle_s",
 ]
 
 TS_FIELDS = [
@@ -143,6 +189,34 @@ TS_FIELDS = [
     "auto_left_cmd",
     "auto_right_cmd",
     "limiter_reason",
+    # --- additive KTI fields (PRD.md section 8.1/8.3/8.5) ---
+    "proximity",
+    "centrality",
+    "approach",
+    "bearing_consistency",
+    "vttc_score",
+    "risk_class",
+    "confidence",
+    "area_ratio",
+    "bottom_y_ratio",
+    "x_ratio",
+    "bearing_deg",
+    "bearing_rate_dps",
+    "dlog_area_dt",
+    "vttc_s",
+    "dominant_factor",
+    "reason_codes",
+    "takeover_active",
+    "avoid_active",
+    "release_status",
+    "manual_authority",
+    "failsafe_reason",
+    "final_left_cmd",
+    "final_right_cmd",
+    "max_abs_left_cmd",
+    "max_abs_right_cmd",
+    "max_abs_diff_cmd",
+    "selected_command",
 ]
 
 
@@ -289,7 +363,35 @@ class EventLoggerNode(Node):
             "auto_left_cmd": None,
             "auto_right_cmd": None,
             "limiter_reason": "",
+            # --- additive KTI state (populated by new subscriptions below) ---
+            "proximity": None,
+            "centrality": None,
+            "approach": None,
+            "bearing_consistency": None,
+            "vttc_score": None,
+            "risk_class": "",
+            "confidence": None,
+            "area_ratio": None,
+            "bottom_y_ratio": None,
+            "x_ratio": None,
+            "bearing_deg": None,
+            "bearing_rate_dps": None,
+            "dlog_area_dt": None,
+            "vttc_s": None,
+            "dominant_factor": "",
+            "reason_codes": "",
+            "takeover_active": None,
+            "avoid_active": None,
+            "manual_authority": None,
+            "failsafe_reason": "",
+            "selected_command_metrics": None,
         }
+
+        # Session-wide running max, independent of avoidance-cycle bookkeeping,
+        # so time_series.csv always has a max_abs_* value even outside a cycle.
+        self.session_max_abs_left_cmd = 0.0
+        self.session_max_abs_right_cmd = 0.0
+        self.session_max_abs_diff_cmd = 0.0
 
         self.last_logged_avoid_state: Optional[str] = None
         self.last_logged_ca_mode: Optional[str] = None
@@ -344,8 +446,18 @@ class EventLoggerNode(Node):
         self.declare_parameter("limiter_reason_topic", "/seano/limiter_reason")
         self.declare_parameter("mavros_state_topic", "/mavros/state")
         self.declare_parameter("mavros_rc_override_topic", "/mavros/rc/override")
+        # --- additive KTI topics (PRD.md section 8.1/8.3) ---
+        self.declare_parameter("metrics_topic", "/ca/metrics")
+        self.declare_parameter("avoid_active_topic", "/ca/avoid_active")
+        self.declare_parameter(
+            "operator_manual_authority_topic", "/seano/operator_manual_authority"
+        )
+        self.declare_parameter("failsafe_reason_topic", "/ca/failsafe_reason")
+        self.declare_parameter("detections_topic", "/camera/detections")
         self.declare_parameter("frame_max_age_s", 10.0)
-        self.declare_parameter("save_frames", True)
+        # Default changed to False per PRD.md section 10 / AGENTS.md section 16:
+        # KTI logging should default to numeric metrics, not image snapshots.
+        self.declare_parameter("save_frames", False)
         self.declare_parameter("capture_delay_s", 0.35)
         self.declare_parameter("jpeg_quality", 92)
         self.declare_parameter("risk_enter_threshold", 0.20)
@@ -383,7 +495,11 @@ class EventLoggerNode(Node):
 
     def setup_subscriptions(self) -> None:
         q = self.reliable_qos()
-        self.create_subscription(Image, self.image_topic, self.on_image, self.image_qos())
+        # Only subscribe to the debug image when snapshot saving is enabled;
+        # per AGENTS.md section 16.2 the logger should not subscribe to image
+        # topics at all when save_frames=false.
+        if self.save_frames:
+            self.create_subscription(Image, self.image_topic, self.on_image, self.image_qos())
         self.create_subscription(
             String, str(self.get_parameter("avoid_state_topic").value), self.on_avoid_state, q
         )
@@ -488,6 +604,31 @@ class EventLoggerNode(Node):
                 self.on_mavros_rc_override,
                 q,
             )
+        # --- additive KTI subscriptions (read-only; no publishers added) ---
+        self.create_subscription(
+            String, str(self.get_parameter("metrics_topic").value), self.on_metrics, q
+        )
+        self.create_subscription(
+            Bool, str(self.get_parameter("avoid_active_topic").value), self.on_avoid_active, q
+        )
+        self.create_subscription(
+            Bool,
+            str(self.get_parameter("operator_manual_authority_topic").value),
+            self.on_manual_authority,
+            q,
+        )
+        self.create_subscription(
+            String,
+            str(self.get_parameter("failsafe_reason_topic").value),
+            self.on_failsafe_reason,
+            q,
+        )
+        self.create_subscription(
+            Detection2DArray,
+            str(self.get_parameter("detections_topic").value),
+            self.on_detections_seen,
+            q,
+        )
 
     def ros_time_sec(self) -> float:
         return float(self.get_clock().now().nanoseconds) * 1.0e-9
@@ -551,8 +692,13 @@ class EventLoggerNode(Node):
             self.queue_event("auto_master_enable", fmt_bool(value))
 
     def on_auto_enable(self, msg: Bool) -> None:
+        now = self.ros_time_sec()
+        value = bool(msg.data)
         with self.lock:
-            self.state["auto_enable"] = bool(msg.data)
+            self.state["auto_enable"] = value
+            c = self.current_cycle
+            if value and c is not None and c.get("auto_enable_time_sec") is None:
+                c["auto_enable_time_sec"] = now
 
     def on_limiter_reason(self, msg: String) -> None:
         value = str(msg.data).strip()
@@ -579,9 +725,89 @@ class EventLoggerNode(Node):
 
     def on_rc_override_enable(self, msg: Bool) -> None:
         active = bool(msg.data)
+        now = self.ros_time_sec()
         with self.lock:
             self.state["rc_override_enable"] = active
-        self.update_rc_override_activity(active, self.ros_time_sec())
+            c = self.current_cycle
+            # takeover_start_time_sec and rc_override_enable_time_sec are aliases
+            # of the same rising edge in this system: /seano/rc_override_enable is
+            # the strongest available software evidence of takeover (see
+            # docs/audit_phase7_sync_policy.md).
+            if active and c is not None and c.get("takeover_start_time_sec") is None:
+                c["takeover_start_time_sec"] = now
+                c["rc_override_enable_time_sec"] = now
+        self.update_rc_override_activity(active, now)
+
+    def on_metrics(self, msg: String) -> None:
+        try:
+            payload = json.loads(str(msg.data))
+        except Exception:
+            return
+        if not isinstance(payload, dict):
+            return
+        components = payload.get("components", {})
+        if not isinstance(components, dict):
+            components = {}
+        target = payload.get("target", {})
+        if not isinstance(target, dict):
+            target = {}
+        reason_codes = payload.get("reason_codes", [])
+        if not isinstance(reason_codes, list):
+            reason_codes = []
+        dominant_factor = payload.get("dominant_factor") or dominant_factor_from_components(
+            components
+        )
+        with self.lock:
+            self.state["proximity"] = components.get("prox")
+            self.state["centrality"] = components.get("center")
+            self.state["approach"] = components.get("approach")
+            self.state["bearing_consistency"] = components.get("bconst")
+            self.state["vttc_score"] = components.get("ttc_score")
+            self.state["risk_class"] = payload.get("risk_class", self.state.get("risk_class", ""))
+            self.state["confidence"] = target.get("score")
+            self.state["area_ratio"] = target.get("area_ratio")
+            self.state["bottom_y_ratio"] = target.get("bottom_y_ratio")
+            self.state["x_ratio"] = target.get("x_ratio")
+            self.state["bearing_deg"] = target.get("bearing_deg")
+            self.state["bearing_rate_dps"] = target.get("bearing_rate_dps")
+            self.state["dlog_area_dt"] = target.get("dlog_area_dt")
+            self.state["vttc_s"] = target.get("vttc_s")
+            self.state["dominant_factor"] = str(dominant_factor or "")
+            self.state["reason_codes"] = ";".join(str(x) for x in reason_codes)
+            if "takeover_active" in payload:
+                self.state["takeover_active"] = bool(payload.get("takeover_active"))
+            selected_command = payload.get("selected_command")
+            if selected_command is not None:
+                selected_command = str(selected_command).strip()
+            self.state["selected_command_metrics"] = selected_command or None
+
+    def on_avoid_active(self, msg: Bool) -> None:
+        with self.lock:
+            self.state["avoid_active"] = bool(msg.data)
+
+    def on_manual_authority(self, msg: Bool) -> None:
+        with self.lock:
+            self.state["manual_authority"] = bool(msg.data)
+
+    def on_failsafe_reason(self, msg: String) -> None:
+        with self.lock:
+            self.state["failsafe_reason"] = str(msg.data)
+
+    def on_detections_seen(self, msg: Detection2DArray) -> None:
+        try:
+            has_detection = len(msg.detections) > 0
+        except Exception:
+            has_detection = False
+        if not has_detection:
+            return
+        now = self.ros_time_sec()
+        with self.lock:
+            c = self.current_cycle
+            # Passive observation only: does not create/close cycles and does
+            # not touch last_activity_ros, so cycle-trigger behavior driven by
+            # risk/avoid_state/hazard-command is unchanged.
+            if c is not None and c.get("first_detection_time_sec") is None:
+                c["first_detection_time_sec"] = now
 
     def update_float(self, name: str, value: Any) -> None:
         try:
@@ -603,6 +829,30 @@ class EventLoggerNode(Node):
                 if left is not None and right is not None:
                     c["max_abs_diff_cmd"] = max(
                         c["max_abs_diff_cmd"], abs(float(right) - float(left))
+                    )
+                if (
+                    name in ("left_cmd", "right_cmd")
+                    and c.get("first_actuator_output_time_sec") is None
+                    and bool(self.state.get("rc_override_enable"))
+                ):
+                    c["first_actuator_output_time_sec"] = self.ros_time_sec()
+
+            # Session-wide running max (independent of avoidance-cycle bookkeeping)
+            # so time_series.csv always has max_abs_* values, per PRD.md section 8.5.
+            if name in ("left_cmd", "right_cmd"):
+                left = self.state.get("left_cmd")
+                right = self.state.get("right_cmd")
+                if left is not None:
+                    self.session_max_abs_left_cmd = max(
+                        self.session_max_abs_left_cmd, abs(float(left))
+                    )
+                if right is not None:
+                    self.session_max_abs_right_cmd = max(
+                        self.session_max_abs_right_cmd, abs(float(right))
+                    )
+                if left is not None and right is not None:
+                    self.session_max_abs_diff_cmd = max(
+                        self.session_max_abs_diff_cmd, abs(float(right) - float(left))
                     )
 
     def on_risk(self, msg: Float32) -> None:
@@ -720,6 +970,11 @@ class EventLoggerNode(Node):
             "avoid_start_time_sec": None,
             "rejoin_start_time_sec": None,
             "mission_return_time_sec": None,
+            "first_detection_time_sec": None,
+            "takeover_start_time_sec": None,
+            "auto_enable_time_sec": None,
+            "rc_override_enable_time_sec": None,
+            "first_actuator_output_time_sec": None,
             "entered_avoid": False,
             "entered_rejoin": False,
             "entered_mission_return": False,
@@ -822,6 +1077,13 @@ class EventLoggerNode(Node):
         mean_risk = ""
         if n > 0:
             mean_risk = f"{float(c.get('risk_sum', 0.0)) / n:.4f}"
+        # avoid_duration_s: from avoid_start to whichever of
+        # (rejoin_start, mission_return, cycle end) is available first.
+        avoid_end = (
+            c.get("rejoin_start_time_sec")
+            or c.get("mission_return_time_sec")
+            or c.get("end_ros_time_sec")
+        )
         return {
             "episode_id": str(c.get("episode_id", "")),
             "start_wall_time_iso": str(c.get("start_wall_time_iso", "")),
@@ -871,6 +1133,40 @@ class EventLoggerNode(Node):
             "frame_events_saved": str(c.get("frame_events_saved", 0)),
             "frame_events_failed": str(c.get("frame_events_failed", 0)),
             "notes": str(c.get("notes", "")),
+            # --- additive KTI response-time fields (PRD.md section 8.4) ---
+            "first_detection_time_sec": fmt_float(c.get("first_detection_time_sec"), 6),
+            "takeover_start_time_sec": fmt_float(c.get("takeover_start_time_sec"), 6),
+            "auto_enable_time_sec": fmt_float(c.get("auto_enable_time_sec"), 6),
+            "rc_override_enable_time_sec": fmt_float(c.get("rc_override_enable_time_sec"), 6),
+            "first_actuator_output_time_sec": fmt_float(
+                c.get("first_actuator_output_time_sec"), 6
+            ),
+            "cycle_end_time_sec": fmt_float(c.get("end_ros_time_sec"), 6),
+            "detection_to_risk_s": duration(
+                c.get("first_detection_time_sec"), c.get("first_risk_time_sec")
+            ),
+            "risk_to_command_s": duration(
+                c.get("first_risk_time_sec"), c.get("first_hazard_command_time_sec")
+            ),
+            "command_to_takeover_s": duration(
+                c.get("first_hazard_command_time_sec"), c.get("takeover_start_time_sec")
+            ),
+            "command_to_auto_enable_s": duration(
+                c.get("first_hazard_command_time_sec"), c.get("auto_enable_time_sec")
+            ),
+            "command_to_rc_override_s": duration(
+                c.get("first_hazard_command_time_sec"), c.get("rc_override_enable_time_sec")
+            ),
+            "command_to_actuator_s": duration(
+                c.get("first_hazard_command_time_sec"), c.get("first_actuator_output_time_sec")
+            ),
+            "detection_to_actuator_s": duration(
+                c.get("first_detection_time_sec"), c.get("first_actuator_output_time_sec")
+            ),
+            "avoid_duration_s": duration(c.get("avoid_start_time_sec"), avoid_end),
+            "total_avoidance_cycle_s": duration(
+                c.get("start_ros_time_sec"), c.get("end_ros_time_sec")
+            ),
         }
 
     def queue_event(self, trigger: str, value: str) -> None:
@@ -1019,6 +1315,26 @@ class EventLoggerNode(Node):
 
     def write_timeseries_row(self) -> None:
         s = self.snapshot_state()
+
+        takeover_active_val = s.get("takeover_active")
+        if takeover_active_val is None:
+            takeover_active_val = s.get("rc_override_enable")
+        rc_override_enable_val = s.get("rc_override_enable")
+        # release_status is a simple derived complement of takeover_active in
+        # this system: True when RC override is not currently engaged. The
+        # authoritative event sequence remains in avoid_state/mode_event/
+        # command_safe; this column is a convenience for KTI tables only.
+        release_status_val = (
+            None if rc_override_enable_val is None else (not bool(rc_override_enable_val))
+        )
+
+        # selected_command: prefer the value risk_evaluator already resolved
+        # in /ca/metrics; fall back to command_safe, then command_raw, if the
+        # metrics payload does not carry it.
+        selected_command_val = (
+            s.get("selected_command_metrics") or s.get("command_safe") or s.get("command_raw") or ""
+        )
+
         row = {
             "wall_time_iso": now_iso(),
             "ros_time_sec": f"{self.ros_time_sec():.6f}",
@@ -1043,6 +1359,34 @@ class EventLoggerNode(Node):
             "auto_left_cmd": fmt_float(s.get("auto_left_cmd"), 4),
             "auto_right_cmd": fmt_float(s.get("auto_right_cmd"), 4),
             "limiter_reason": str(s.get("limiter_reason", "")),
+            # --- additive KTI fields ---
+            "proximity": fmt_float(s.get("proximity"), 4),
+            "centrality": fmt_float(s.get("centrality"), 4),
+            "approach": fmt_float(s.get("approach"), 4),
+            "bearing_consistency": fmt_float(s.get("bearing_consistency"), 4),
+            "vttc_score": fmt_float(s.get("vttc_score"), 4),
+            "risk_class": str(s.get("risk_class", "")),
+            "confidence": fmt_float(s.get("confidence"), 4),
+            "area_ratio": fmt_float(s.get("area_ratio"), 6),
+            "bottom_y_ratio": fmt_float(s.get("bottom_y_ratio"), 6),
+            "x_ratio": fmt_float(s.get("x_ratio"), 6),
+            "bearing_deg": fmt_float(s.get("bearing_deg"), 3),
+            "bearing_rate_dps": fmt_float(s.get("bearing_rate_dps"), 3),
+            "dlog_area_dt": fmt_float(s.get("dlog_area_dt"), 6),
+            "vttc_s": fmt_float(s.get("vttc_s"), 3),
+            "dominant_factor": str(s.get("dominant_factor", "")),
+            "reason_codes": str(s.get("reason_codes", "")),
+            "takeover_active": fmt_bool(takeover_active_val),
+            "avoid_active": fmt_bool(s.get("avoid_active")),
+            "release_status": fmt_bool(release_status_val),
+            "manual_authority": fmt_bool(s.get("manual_authority")),
+            "failsafe_reason": str(s.get("failsafe_reason", "")),
+            "final_left_cmd": fmt_float(s.get("left_cmd"), 4),
+            "final_right_cmd": fmt_float(s.get("right_cmd"), 4),
+            "max_abs_left_cmd": fmt_float(self.session_max_abs_left_cmd, 4),
+            "max_abs_right_cmd": fmt_float(self.session_max_abs_right_cmd, 4),
+            "max_abs_diff_cmd": fmt_float(self.session_max_abs_diff_cmd, 4),
+            "selected_command": str(selected_command_val),
         }
         with open(self.timeseries_csv, "a", newline="", encoding="utf-8") as f:
             csv.DictWriter(f, fieldnames=TS_FIELDS).writerow(row)
@@ -1114,8 +1458,21 @@ class EventLoggerNode(Node):
 
     def write_summary_files(self) -> None:
         summary = self.summary_dict()
-        with open(self.summary_json, "w", encoding="utf-8") as f:
-            json.dump(jsonable(summary), f, ensure_ascii=False, indent=2)
+        # Write atomically: a signal (e.g. SIGINT from a timeout-bounded run)
+        # arriving mid-write must never leave metrics_summary.json truncated
+        # or overwrite a previously-valid file with a partial one.
+        summary_json_tmp = f"{self.summary_json}.tmp"
+        try:
+            with open(summary_json_tmp, "w", encoding="utf-8") as f:
+                json.dump(jsonable(summary), f, ensure_ascii=False, indent=2)
+                f.flush()
+            os.replace(summary_json_tmp, self.summary_json)
+        except Exception:
+            try:
+                if os.path.exists(summary_json_tmp):
+                    os.remove(summary_json_tmp)
+            except Exception:
+                pass
         rows = []
 
         def add(metric: str, value: Any) -> None:
