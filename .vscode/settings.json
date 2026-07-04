@@ -1,0 +1,27 @@
+{
+  "files.exclude": {
+    "**/build": true,
+    "**/install": true,
+    "**/log": true,
+    "**/__pycache__": true,
+    "**/*.pyc": true,
+    "**/*.pyo": true,
+    "**/.pytest_cache": true,
+    "**/.mypy_cache": true,
+    "**/.phase7_runtime": true,
+    "**/.last_*": true,
+    "**/evidence_phase7": true,
+    "**/*.zip": true,
+    "**/*.bak": true,
+    "**/*.tmp": true
+  },
+  "search.exclude": {
+    "**/build": true,
+    "**/install": true,
+    "**/log": true,
+    "**/__pycache__": true,
+    "**/.pytest_cache": true,
+    "**/.mypy_cache": true,
+    "**/evidence_phase7": true
+  }
+}
