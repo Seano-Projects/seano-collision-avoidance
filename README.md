@@ -14,13 +14,13 @@ This repository contains the ROS 2 workspace for camera-based obstacle perceptio
 |---|---|
 | Platform | NVIDIA Jetson Orin |
 | Middleware | ROS 2 Humble |
-| Perception | Camera stream + YOLOv8 detector |
-| Decision layer | Risk evaluator, watchdog, command mux, safety limiter |
+| Perception | Camera stream and YOLOv8 detector |
+| Decision layer | Risk evaluator, watchdog, command mux, and safety limiter |
 | Current actuation path | Existing SEANO control stack |
 | RC override publisher | `/usv/thruster` only |
 | Direct bridge from this repo | Disabled in the recommended field workflow |
 | Main run script | `seano_ca_ws/run_pool_existing_control_path.sh` |
-| Runtime output | CSV and JSON/JSONL logs for field analysis |
+| Runtime output | CSV, JSON, and JSONL logs for field analysis |
 
 ## Table of Contents
 
