@@ -1,8 +1,46 @@
 # seano-collision-avoidance
 
-Vision-based collision avoidance stack for the SEANO Unmanned Surface Vehicle (USV).
+![ROS 2 Humble](https://img.shields.io/badge/ROS%202-Humble-22314E)
+![Python](https://img.shields.io/badge/Python-3.10-3776AB)
+![Jetson Orin](https://img.shields.io/badge/Platform-Jetson%20Orin-76B900)
+![YOLOv8](https://img.shields.io/badge/Perception-YOLOv8-00599C)
+![Existing Control Path](https://img.shields.io/badge/Actuation-Existing%20Control%20Path-informational)
+![Field Logging](https://img.shields.io/badge/Logging-Field--Test%20Ready-success)
+
+Vision-based collision avoidance stack for the SEANO Unmanned Surface Vehicle (USV). The system performs camera-based obstacle perception, risk evaluation, and internal avoidance decision-making, with structured logging for field-test analysis.
+
+![SEANO collision avoidance system overview](docs/assets/seano_ca_system_overview.png)
+
+Conceptual overview of the current field-test workflow. The collision avoidance stack performs perception, risk evaluation, internal command generation, monitoring, and logging, while physical actuation remains handled by the existing SEANO control path.
+
+## Table of Contents
+
+- [Overview](#overview)
+- [Current Operating Mode](#current-operating-mode)
+- [Features](#features)
+- [Quick Start](#quick-start)
+- [Field-Test Preflight](#field-test-preflight)
+- [Runtime Outputs](#runtime-outputs)
+- [Runtime HUD Example](#runtime-hud-example)
+- [Repository Structure](#repository-structure)
+- [Main Runtime Nodes](#main-runtime-nodes)
+- [Documentation](#documentation)
+- [Safety Notes](#safety-notes)
+- [Development Checks](#development-checks)
+- [License](#license)
+
+## Overview
 
 This repository contains the ROS 2 workspace used for obstacle perception, risk evaluation, avoidance decision logic, runtime monitoring, and structured field-test logging. The system is designed to support safe USV operation by detecting visual obstacles, estimating collision risk, and producing internal avoidance commands that can be reviewed, logged, and integrated with the vehicle control stack.
+
+Target platform:
+
+- NVIDIA Jetson Orin
+- ROS 2 Humble
+- Python-based ROS 2 nodes
+- YOLOv8 perception model
+- MAVROS-compatible vehicle environment
+- SEANO existing vehicle control stack
 
 ## Current Operating Mode
 
@@ -28,17 +66,6 @@ This configuration avoids duplicate RC override publishers while still producing
 - Field-test run script for existing-control-path operation.
 - Optional full-profile perception nodes for extended experiments and future integration.
 
-## Platform
-
-Target platform:
-
-- NVIDIA Jetson Orin
-- ROS 2 Humble
-- Python-based ROS 2 nodes
-- YOLOv8 perception model
-- MAVROS-compatible vehicle environment
-- SEANO existing vehicle control stack
-
 ## Quick Start
 
 Use the existing-control-path field-test script:
@@ -48,7 +75,13 @@ cd seano_ca_ws
 ./run_pool_existing_control_path.sh
 ```
 
-Stop the run with `Ctrl+C` in the same terminal that started the script. This stops the collision avoidance launch process started by this repository. It does not stop the existing SEANO control services.
+Stop the run with:
+
+```text
+Ctrl+C
+```
+
+Use `Ctrl+C` in the same terminal that started the script. This stops the collision avoidance launch process started by this repository. It does not stop the existing SEANO control services.
 
 Do not use `run_phase7_monitor_no_log.sh` for the current existing-control-path field-test workflow. That script belongs to an older operational path and does not represent the current recommended logging and no-bridge configuration.
 
@@ -84,7 +117,21 @@ Important outputs include:
 
 Frame capture is disabled by default for the current workflow.
 
+## Runtime HUD Example
+
+<details>
+<summary>Runtime HUD example</summary>
+
+![SEANO collision avoidance runtime HUD](docs/assets/seano_ca_runtime_hud_example.png)
+
+Example runtime HUD showing obstacle tracking, risk score, command state, fail-safe status, and collision-avoidance decision context during a field run.
+
+</details>
+
 ## Repository Structure
+
+<details>
+<summary>Repository tree</summary>
 
 ```text
 .
@@ -93,6 +140,9 @@ Frame capture is disabled by default for the current workflow.
 ├── SKILLS.md
 ├── README.md
 ├── docs/
+│   ├── assets/
+│   │   ├── seano_ca_system_overview.png
+│   │   └── seano_ca_runtime_hud_example.png
 │   ├── CLEANUP_NOTES.md
 │   ├── REPO_MAP.md
 │   └── RUNBOOK_POOL_EXISTING_CONTROL_PATH.md
@@ -107,7 +157,11 @@ Frame capture is disabled by default for the current workflow.
             └── seano_vision/
 ```
 
+</details>
+
 ## Main Runtime Nodes
+
+### Active in current workflow
 
 The current existing-control-path workflow uses the core collision avoidance pipeline:
 
@@ -121,7 +175,9 @@ The current existing-control-path workflow uses the core collision avoidance pip
 - `mission_mode_manager_node.py`
 - `event_logger_node.py`
 
-Optional full-profile perception nodes are retained for extended configurations and should not be removed:
+### Optional full-profile nodes
+
+Retained for extended configurations and should not be removed:
 
 - `vision_quality_node.py`
 - `false_positive_guard_node.py`
@@ -147,9 +203,8 @@ This repository is used around a real vehicle platform. Treat launch files, actu
 Key rules:
 
 - Do not run multiple publishers to `/mavros/rc/override`.
-- Do not enable the direct RC override bridge unless the actuation interface has been explicitly validated.
-- Keep operator/manual authority available during field testing.
-- Prefer the existing-control-path script for current field tests.
+- The direct RC override bridge must remain disabled for the existing-control-path workflow.
+- Operator/manual authority must remain available at all times during field testing.
 - Review logs after each run before making further changes.
 
 ## Development Checks
@@ -176,4 +231,4 @@ bash -n seano_ca_ws/run_pool_existing_control_path.sh
 
 ## License
 
-This repository does not currently include a license file. Until a license is added, no reuse, redistribution, or modification rights are granted beyond what the repository owner explicitly permits.
+No license has been specified yet.
