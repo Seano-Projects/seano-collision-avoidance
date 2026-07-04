@@ -1,17 +1,26 @@
-# seano-collision-avoidance
+# SEANO Collision Avoidance
 
-![ROS 2 Humble](https://img.shields.io/badge/ROS%202-Humble-22314E)
-![Python](https://img.shields.io/badge/Python-3.10-3776AB)
-![Jetson Orin](https://img.shields.io/badge/Platform-Jetson%20Orin-76B900)
-![YOLOv8](https://img.shields.io/badge/Perception-YOLOv8-00599C)
-![Existing Control Path](https://img.shields.io/badge/Actuation-Existing%20Control%20Path-informational)
-![Field Logging](https://img.shields.io/badge/Logging-Field--Test%20Ready-success)
+Vision-based collision avoidance support stack for the SEANO Unmanned Surface Vehicle (USV).
 
-Vision-based collision avoidance stack for the SEANO Unmanned Surface Vehicle (USV). The system performs camera-based obstacle perception, risk evaluation, and internal avoidance decision-making, with structured logging for field-test analysis.
+This repository contains the ROS 2 workspace for camera-based obstacle perception, collision-risk evaluation, internal avoidance command generation, runtime monitoring, and structured field-test logging. The current recommended workflow is designed to run alongside the existing SEANO vehicle control stack without introducing a second RC override publisher.
 
 ![SEANO collision avoidance system overview](docs/assets/seano_ca_system_overview.png)
 
-Conceptual overview of the current field-test workflow. The collision avoidance stack performs perception, risk evaluation, internal command generation, monitoring, and logging, while physical actuation remains handled by the existing SEANO control path.
+*Conceptual overview of the current field-test workflow. The collision avoidance stack performs perception, risk evaluation, internal command generation, monitoring, and logging, while physical actuation remains handled by the existing SEANO control path.*
+
+## At a Glance
+
+| Category | Current configuration |
+|---|---|
+| Platform | NVIDIA Jetson Orin |
+| Middleware | ROS 2 Humble |
+| Perception | Camera stream + YOLOv8 detector |
+| Decision layer | Risk evaluator, watchdog, command mux, safety limiter |
+| Current actuation path | Existing SEANO control stack |
+| RC override publisher | `/usv/thruster` only |
+| Direct bridge from this repo | Disabled in the recommended field workflow |
+| Main run script | `seano_ca_ws/run_pool_existing_control_path.sh` |
+| Runtime output | CSV and JSON/JSONL logs for field analysis |
 
 ## Table of Contents
 
@@ -31,16 +40,9 @@ Conceptual overview of the current field-test workflow. The collision avoidance 
 
 ## Overview
 
-This repository contains the ROS 2 workspace used for obstacle perception, risk evaluation, avoidance decision logic, runtime monitoring, and structured field-test logging. The system is designed to support safe USV operation by detecting visual obstacles, estimating collision risk, and producing internal avoidance commands that can be reviewed, logged, and integrated with the vehicle control stack.
+The system processes visual input from the USV camera, detects potential obstacles, evaluates collision risk, and produces internal avoidance decisions such as hold course, slow down, turn, or stop. Runtime state, risk components, command decisions, and avoidance-cycle timing are written to structured log files for review after each run.
 
-Target platform:
-
-- NVIDIA Jetson Orin
-- ROS 2 Humble
-- Python-based ROS 2 nodes
-- YOLOv8 perception model
-- MAVROS-compatible vehicle environment
-- SEANO existing vehicle control stack
+The repository is organized around a safety-conscious field-test workflow. It does not replace the existing SEANO vehicle control stack. Instead, it provides perception, risk assessment, decision support, and logging around the current control architecture.
 
 ## Current Operating Mode
 
@@ -48,7 +50,7 @@ The recommended field-test configuration uses the existing SEANO vehicle control
 
 In this mode:
 
-- the collision avoidance stack runs camera perception, detection, risk scoring, internal command generation, and logging;
+- the collision avoidance stack runs camera perception, detection, risk scoring, internal command generation, monitoring, and logging;
 - the existing SEANO control stack remains responsible for physical actuation;
 - `/usv/thruster` remains the only publisher to `/mavros/rc/override`;
 - `mavros_rc_override_bridge_node` from this repository is intentionally disabled;
@@ -59,12 +61,13 @@ This configuration avoids duplicate RC override publishers while still producing
 ## Features
 
 - Camera-based obstacle detection using YOLOv8.
-- Risk evaluation based on proximity, centrality, approach, bearing consistency, and visual time-to-collision indicators.
-- Risk-class and command generation for hold-course, slow-down, turn, and stop decisions.
+- Collision-risk evaluation using proximity, centrality, approach, bearing consistency, and visual time-to-collision indicators.
+- Internal command generation for hold-course, slow-down, turn, and stop decisions.
 - Watchdog and perception-loss fail-safe handling.
+- Safety-aware command limiting and mission-state monitoring.
 - Structured runtime logging for time-series data, avoidance cycles, events, and summary metrics.
-- Field-test run script for existing-control-path operation.
-- Optional full-profile perception nodes for extended experiments and future integration.
+- Field-test workflow for integration with the existing SEANO control path.
+- Optional full-profile perception nodes for extended testing and future integration.
 
 ## Quick Start
 
@@ -83,7 +86,7 @@ Ctrl+C
 
 Use `Ctrl+C` in the same terminal that started the script. This stops the collision avoidance launch process started by this repository. It does not stop the existing SEANO control services.
 
-Do not use `run_phase7_monitor_no_log.sh` for the current existing-control-path field-test workflow. That script belongs to an older operational path and does not represent the current recommended logging and no-bridge configuration.
+Do not use `run_phase7_monitor_no_log.sh` for the current existing-control-path workflow. That script belongs to an older operational path and does not represent the current recommended logging and no-bridge configuration.
 
 ## Field-Test Preflight
 
@@ -95,7 +98,7 @@ Before running a field test, verify:
 - No `mavros_rc_override_bridge_node` from this repository is already running.
 - Camera and detector are physically ready.
 - Operator/manual authority is available.
-- Test area is clear and safe.
+- The test area is clear and safe.
 - The vehicle control operator understands that physical actuation remains under the existing SEANO control stack.
 
 The run script performs conservative preflight checks before launching the collision avoidance stack.
@@ -103,8 +106,6 @@ The run script performs conservative preflight checks before launching the colli
 ## Runtime Outputs
 
 The event logger writes structured files under the configured event log directory.
-
-Important outputs include:
 
 | File | Purpose |
 |---|---|
@@ -120,7 +121,7 @@ Frame capture is disabled by default for the current workflow.
 ## Runtime HUD Example
 
 <details>
-<summary>Runtime HUD example</summary>
+<summary>View runtime HUD example</summary>
 
 ![SEANO collision avoidance runtime HUD](docs/assets/seano_ca_runtime_hud_example.png)
 
@@ -131,7 +132,7 @@ Example runtime HUD showing obstacle tracking, risk score, command state, fail-s
 ## Repository Structure
 
 <details>
-<summary>Repository tree</summary>
+<summary>View repository tree</summary>
 
 ```text
 .
@@ -161,9 +162,10 @@ Example runtime HUD showing obstacle tracking, risk score, command state, fail-s
 
 ## Main Runtime Nodes
 
-### Active in current workflow
+<details>
+<summary>View active and optional nodes</summary>
 
-The current existing-control-path workflow uses the core collision avoidance pipeline:
+Active in the current existing-control-path workflow:
 
 - `camera_node.py`
 - `detector_node.py`
@@ -175,15 +177,15 @@ The current existing-control-path workflow uses the core collision avoidance pip
 - `mission_mode_manager_node.py`
 - `event_logger_node.py`
 
-### Optional full-profile nodes
-
-Retained for extended configurations and should not be removed:
+Optional full-profile perception nodes retained for extended configurations:
 
 - `vision_quality_node.py`
 - `false_positive_guard_node.py`
 - `frame_freeze_detector_node.py`
 - `multi_target_fusion_node.py`
 - `waterline_horizon_node.py`
+
+</details>
 
 ## Documentation
 
@@ -203,8 +205,10 @@ This repository is used around a real vehicle platform. Treat launch files, actu
 Key rules:
 
 - Do not run multiple publishers to `/mavros/rc/override`.
-- The direct RC override bridge must remain disabled for the existing-control-path workflow.
-- Operator/manual authority must remain available at all times during field testing.
+- Keep `mavros_rc_override_bridge_node` disabled for the existing-control-path workflow.
+- Do not enable a direct RC override bridge unless the actuation interface has been explicitly validated.
+- Keep operator/manual authority available during field testing.
+- Prefer `run_pool_existing_control_path.sh` for the current field-test workflow.
 - Review logs after each run before making further changes.
 
 ## Development Checks
