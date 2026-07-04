@@ -173,3 +173,7 @@ Script syntax check:
 ```bash
 bash -n seano_ca_ws/run_pool_existing_control_path.sh
 ```
+
+## License
+
+This repository does not currently include a license file. Until a license is added, no reuse, redistribution, or modification rights are granted beyond what the repository owner explicitly permits.
