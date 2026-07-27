@@ -29,6 +29,9 @@ import rclpy
 from rclpy.node import Node
 from std_msgs.msg import Bool, Float32, String
 
+from .risk_policy import normalize_command_details
+from .thruster_preview import actuator_path_gate_open
+
 
 def clamp(x: float, lo: float, hi: float) -> float:
     return max(lo, min(hi, x))
@@ -57,6 +60,10 @@ class AutoTakeoverManager(Node):
         self.declare_parameter("out_right_topic", "/seano/auto/right_cmd")
         self.declare_parameter("auto_enable_topic", "/seano/auto_enable")
         self.declare_parameter("rc_override_enable_topic", "/seano/rc_override_enable")
+        self.declare_parameter("actuator_path_ready_topic", "/ca/actuator_path_ready")
+        self.declare_parameter("takeover_requested_topic", "/ca/takeover_requested")
+        self.declare_parameter("require_actuator_path_ready", False)
+        self.declare_parameter("actuator_path_ready_timeout_s", 1.0)
 
         # Master enable (biar bisa matikan autonomy tanpa kill node)
         self.declare_parameter("master_enable_topic", "/seano/auto_master_enable")
@@ -103,6 +110,8 @@ class AutoTakeoverManager(Node):
         # ---------------- State ----------------
         self.master_enabled = bool(self.get_parameter("master_enable_on_start").value)
         self.failsafe_active = False
+        self.actuator_path_ready = False
+        self.actuator_path_ready_t = 0.0
         self.cmd = CmdStamp(value=str(self.get_parameter("cmd_hold").value), t=0.0)
 
         self.state = "PASSIVE"  # PASSIVE | TAKEOVER | FAILSAFE_STOP
@@ -123,6 +132,9 @@ class AutoTakeoverManager(Node):
         self.pub_rc_override_enable = self.create_publisher(
             Bool, str(self.get_parameter("rc_override_enable_topic").value), 10
         )
+        self.pub_takeover_requested = self.create_publisher(
+            Bool, str(self.get_parameter("takeover_requested_topic").value), 10
+        )
 
         self.create_subscription(
             String, str(self.get_parameter("command_topic").value), self._cb_cmd, 10
@@ -132,6 +144,10 @@ class AutoTakeoverManager(Node):
         )
         self.create_subscription(
             Bool, str(self.get_parameter("master_enable_topic").value), self._cb_master, 10
+        )
+        self.create_subscription(
+            Bool, str(self.get_parameter("actuator_path_ready_topic").value),
+            self._cb_actuator_path_ready, 10
         )
 
         hz = float(self.get_parameter("rate_hz").value)
@@ -155,7 +171,11 @@ class AutoTakeoverManager(Node):
 
     # ---------------- Callbacks ----------------
     def _cb_cmd(self, msg: String) -> None:
-        self.cmd.value = str(msg.data).strip()
+        self.cmd.value, known, token = normalize_command_details(msg.data)
+        if not known:
+            self.get_logger().error(
+                f"UNKNOWN_COMMAND_FAILSAFE raw='{msg.data}' normalized='{token}' -> STOP"
+            )
         self.cmd.t = time.time()
 
     def _cb_failsafe(self, msg: Bool) -> None:
@@ -163,6 +183,10 @@ class AutoTakeoverManager(Node):
 
     def _cb_master(self, msg: Bool) -> None:
         self.master_enabled = bool(msg.data)
+
+    def _cb_actuator_path_ready(self, msg: Bool) -> None:
+        self.actuator_path_ready = bool(msg.data)
+        self.actuator_path_ready_t = time.monotonic()
 
     # ---------------- Helpers ----------------
     def _is_cmd_clear(self, cmd: str) -> bool:
@@ -210,10 +234,24 @@ class AutoTakeoverManager(Node):
     def _publish(
         self, left: float, right: float, auto_enable: bool, rc_override_enable: bool
     ) -> None:
+        requested = bool(rc_override_enable)
+        applied = requested and actuator_path_gate_open(
+            actuator_path_ready=self.actuator_path_ready,
+            ready_received_at=self.actuator_path_ready_t,
+            now=time.monotonic(),
+            timeout_s=float(self.get_parameter("actuator_path_ready_timeout_s").value),
+            require_ready=bool(self.get_parameter("require_actuator_path_ready").value),
+        )
         self.pub_left.publish(Float32(data=float(left)))
         self.pub_right.publish(Float32(data=float(right)))
         self.pub_auto_enable.publish(Bool(data=bool(auto_enable)))
-        self.pub_rc_override_enable.publish(Bool(data=bool(rc_override_enable)))
+        self.pub_takeover_requested.publish(Bool(data=requested))
+        self.pub_rc_override_enable.publish(Bool(data=applied))
+        if requested and not applied:
+            self.get_logger().warn(
+                "ACTUATOR_PATH_NOT_READY: takeover requested internally but not applied",
+                throttle_duration_sec=2.0,
+            )
 
     def _publish_passive(self) -> None:
         # PASSIVE: lepaskan RC override + AUTO off

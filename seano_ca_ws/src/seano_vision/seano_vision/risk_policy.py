@@ -1,8 +1,10 @@
-"""Shared Phase 7 risk-band policy.
+"""Shared Phase 7 risk-band and command policy.
 
 These constants define the operator-facing risk bands. Nodes may still expose
 ROS parameters for field tuning, but defaults should stay aligned here.
 """
+
+import re
 
 LOW_RISK_MAX = 0.30
 HIGH_RISK_MIN = 0.60
@@ -21,6 +23,15 @@ LOW_COMMANDS = {CMD_HOLD}
 MEDIUM_COMMANDS = {CMD_SLOW, CMD_TURN_LEFT_SLOW, CMD_TURN_RIGHT_SLOW}
 HIGH_COMMANDS = {CMD_STOP, CMD_TURN_LEFT, CMD_TURN_RIGHT}
 AVOIDANCE_COMMANDS = MEDIUM_COMMANDS | HIGH_COMMANDS
+CANONICAL_COMMANDS = LOW_COMMANDS | MEDIUM_COMMANDS | HIGH_COMMANDS
+
+# Documented compatibility aliases. Formatting normalization is applied first.
+COMMAND_ALIASES = {
+    "HOLD": CMD_HOLD,
+    "SLOW": CMD_SLOW,
+    "LEFT_SLOW": CMD_TURN_LEFT_SLOW,
+    "RIGHT_SLOW": CMD_TURN_RIGHT_SLOW,
+}
 
 EMERGENCY_SOURCES = {"EMERGENCY", "EMERGENCY_VTTC"}
 FAILSAFE_SOURCES = {"FAILSAFE", "INVALID_DATA"}
@@ -42,8 +53,26 @@ def classify_risk(risk: float) -> str:
     return "HIGH"
 
 
+def normalize_command_details(command: str) -> tuple[str, bool, str]:
+    """Return (canonical command, recognized, normalized input token).
+
+    Empty input retains the historical HOLD_COURSE meaning. Any non-empty,
+    unknown input fails closed to STOP and must be logged by the receiving node
+    as ``UNKNOWN_COMMAND_FAILSAFE``.
+    """
+    token = str(command or "").strip().upper()
+    token = re.sub(r"[\s-]+", "_", token)
+    token = re.sub(r"_+", "_", token).strip("_")
+    if not token:
+        return CMD_HOLD, True, token
+    canonical = COMMAND_ALIASES.get(token, token)
+    if canonical in CANONICAL_COMMANDS:
+        return canonical, True, token
+    return CMD_STOP, False, token
+
+
 def normalize_command(command: str) -> str:
-    return str(command or "").strip().upper()
+    return normalize_command_details(command)[0]
 
 
 def normalize_source(source: str) -> str:

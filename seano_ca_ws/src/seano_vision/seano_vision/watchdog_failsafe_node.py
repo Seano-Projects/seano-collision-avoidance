@@ -42,6 +42,7 @@ from seano_vision.risk_policy import (
     command_is_avoidance,
     command_is_high_severity,
     normalize_command,
+    normalize_command_details,
 )
 
 
@@ -368,7 +369,11 @@ class WatchdogFailsafeNode(Node):
 
     def _on_cmd(self, msg: String) -> None:
         self.last_cmd_t = _now_s()
-        self.cmd_in = str(msg.data)
+        self.cmd_in, known, token = normalize_command_details(msg.data)
+        if not known:
+            self.get_logger().error(
+                f"UNKNOWN_COMMAND_FAILSAFE raw='{msg.data}' normalized='{token}' -> STOP"
+            )
 
     def _metric_bool(self, value, default: bool = False) -> bool:
         if isinstance(value, bool):
@@ -474,7 +479,7 @@ class WatchdogFailsafeNode(Node):
         return (False, "")
 
     def _limit_cmd_for_caution(self, cmd: str) -> str:
-        cmd = str(cmd or "").strip().upper()
+        cmd = normalize_command(cmd)
         cmd_hold = str(self.get_parameter("cmd_hold").value)
         cmd_slow = str(self.get_parameter("cmd_slow").value)
         cmd_tls = str(self.get_parameter("cmd_turn_left_slow").value)

@@ -13,10 +13,15 @@ Catatan:
 
 from __future__ import annotations
 
-import rclpy
+try:
+    import rclpy
+except ModuleNotFoundError:  # Allow hardware-free pure-policy unit tests.
+    rclpy = None
 
 
 def _patch_safe_shutdown() -> None:
+    if rclpy is None:
+        return
     if getattr(rclpy, "_seano_safe_shutdown_patched", False):
         return
 

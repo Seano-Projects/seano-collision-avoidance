@@ -45,6 +45,8 @@ from rclpy.node import Node
 from rclpy.qos import DurabilityPolicy, HistoryPolicy, QoSProfile, ReliabilityPolicy
 from std_msgs.msg import Bool, String
 
+from .thruster_preview import actuator_path_gate_open
+
 
 def _qos(depth: int = 10) -> QoSProfile:
     return QoSProfile(
@@ -104,6 +106,9 @@ class MissionModeManager(Node):
         self.declare_parameter("mavros_state_topic", "/mavros/state")
         self.declare_parameter("rc_override_enable_topic", "/seano/rc_override_enable")
         self.declare_parameter("failsafe_active_topic", "/ca/failsafe_active")
+        self.declare_parameter("actuator_path_ready_topic", "/ca/actuator_path_ready")
+        self.declare_parameter("require_actuator_path_ready", False)
+        self.declare_parameter("actuator_path_ready_timeout_s", 1.0)
         self.declare_parameter("set_mode_service", "/mavros/set_mode")
 
         # Mode policy
@@ -142,6 +147,8 @@ class MissionModeManager(Node):
         self.declare_parameter("tick_hz", 5.0)
 
         self.st = _MgrState()
+        self.actuator_path_ready = False
+        self.actuator_path_ready_t = 0.0
         # SEANO_STATE_MACHINE_GOVERNOR_V5
         self.st.avoid_active_decision = False
         self.st.avoid_true_since = 0.0
@@ -188,6 +195,12 @@ class MissionModeManager(Node):
             self._cb_failsafe,
             _qos(10),
         )
+        self.create_subscription(
+            Bool,
+            str(self.get_parameter("actuator_path_ready_topic").value),
+            self._cb_actuator_path_ready,
+            _qos(10),
+        )
 
         self.cli_set_mode = self.create_client(
             SetMode, str(self.get_parameter("set_mode_service").value)
@@ -211,6 +224,22 @@ class MissionModeManager(Node):
         )
 
     # -------- Callbacks --------
+
+    def _actuator_takeover_allowed(self) -> bool:
+        return actuator_path_gate_open(
+            actuator_path_ready=self.actuator_path_ready,
+            ready_received_at=self.actuator_path_ready_t,
+            now=_now_s(),
+            timeout_s=float(self.get_parameter("actuator_path_ready_timeout_s").value),
+            require_ready=bool(self.get_parameter("require_actuator_path_ready").value),
+        )
+
+    def _cb_actuator_path_ready(self, msg: Bool) -> None:
+        self.actuator_path_ready = bool(msg.data)
+        self.actuator_path_ready_t = _now_s()
+        if not self.actuator_path_ready:
+            self.st.pending_mode = None
+            self._clear_rejoin()
 
     def _cb_avoid_active(self, msg: Bool) -> None:
         now = float(self.get_clock().now().nanoseconds) * 1.0e-9
@@ -267,6 +296,9 @@ class MissionModeManager(Node):
 
         # rising: takeover ON
         if (not prev) and cur:
+            if not self._actuator_takeover_allowed():
+                self._emit_event("TAKEOVER_BLOCKED", {"reason": "ACTUATOR_PATH_NOT_READY"})
+                return
             self.st.restore_mode_after_avoid = self._current_mission_restore_target()
             self._cancel_rejoin("takeover_on")
             self._emit_event(
@@ -303,6 +335,9 @@ class MissionModeManager(Node):
 
         # rising: failsafe ON
         if (not prev) and cur:
+            if not self._actuator_takeover_allowed():
+                self._emit_event("FAILSAFE_MODE_BLOCKED", {"reason": "ACTUATOR_PATH_NOT_READY"})
+                return
             self.st.restore_mode_after_failsafe = self._current_mission_restore_target()
             self._cancel_rejoin("failsafe_on")
             self._emit_event(
@@ -343,6 +378,10 @@ class MissionModeManager(Node):
         mgr_state = self._compute_mgr_state(override_on=override_on, failsafe_on=failsafe_on)
         self.pub_state.publish(String(data=mgr_state))
         self._publish_operator_manual_authority()
+
+        if not self._actuator_takeover_allowed():
+            # Pool preview profile: observe decisions only; never touch FCU mode.
+            return
 
         if bool(self.st.operator_manual_authority):
             self._apply_operator_manual_inhibit("tick")
@@ -423,6 +462,10 @@ class MissionModeManager(Node):
         self._request_mode(target, cause=f"enforce_{mgr_state.lower()}")
 
     def _compute_mgr_state(self, override_on: bool, failsafe_on: bool) -> str:
+        # Decisions remain visible, but no AVOID/FAILSAFE MANUAL-mode claim is
+        # made until the external actuator contract has been confirmed ready.
+        if not self._actuator_takeover_allowed():
+            return "MISSION"
         if failsafe_on:
             return "FAILSAFE"
 
@@ -507,6 +550,9 @@ class MissionModeManager(Node):
                 self._clear_rejoin()
 
     def _start_rejoin(self, restore_mode: str, reason: str) -> None:
+        if not self._actuator_takeover_allowed():
+            self._emit_event("REJOIN_SKIPPED", {"reason": "ACTUATOR_PATH_NOT_READY"})
+            return
         if bool(self.st.operator_manual_authority):
             self._apply_operator_manual_inhibit("rejoin_start")
             self._emit_event(
@@ -686,6 +732,13 @@ class MissionModeManager(Node):
 
     def _request_mode(self, mode: str, cause: str) -> None:
         mode = _norm_mode(mode)
+        if not self._actuator_takeover_allowed():
+            self.st.pending_mode = None
+            self._emit_event(
+                "MODE_REQ_SKIPPED",
+                {"mode": mode, "cause": cause, "reason": "ACTUATOR_PATH_NOT_READY"},
+            )
+            return
         if bool(self.st.operator_manual_authority):
             self._apply_operator_manual_inhibit("request_mode")
             self._emit_event(

@@ -35,7 +35,7 @@ from rclpy.executors import ExternalShutdownException
 from rclpy.node import Node
 from rclpy.qos import DurabilityPolicy, HistoryPolicy, QoSProfile, ReliabilityPolicy
 from sensor_msgs.msg import Image
-from std_msgs.msg import Bool, Float32, String
+from std_msgs.msg import Bool, Float32, Int32, String
 from vision_msgs.msg import Detection2DArray
 
 try:
@@ -217,6 +217,11 @@ TS_FIELDS = [
     "max_abs_right_cmd",
     "max_abs_diff_cmd",
     "selected_command",
+    "desired_command", "safe_command", "preview_command", "left_normalized",
+    "right_normalized", "throttle_percent", "steering_percent",
+    "preview_payload", "preview_pwm_ch1", "preview_pwm_ch3",
+    "actuator_path_ready", "hardware_output_enabled", "dry_run",
+    "blocked_reason", "pool_turn_away_policy", "obstacle_side",
 ]
 
 
@@ -385,6 +390,12 @@ class EventLoggerNode(Node):
             "manual_authority": None,
             "failsafe_reason": "",
             "selected_command_metrics": None,
+            "preview_command": "", "preview_payload": "", "throttle_percent": None,
+            "steering_percent": None, "preview_pwm_ch1": None, "preview_pwm_ch3": None,
+            "actuator_path_ready": False, "hardware_output_enabled": False,
+            "actuator_path_ready_t": 0.0,
+            "dry_run": True, "blocked_reason": "", "pool_turn_away_policy": False,
+            "obstacle_side": "",
         }
 
         # Session-wide running max, independent of avoidance-cycle bookkeeping,
@@ -454,6 +465,9 @@ class EventLoggerNode(Node):
         )
         self.declare_parameter("failsafe_reason_topic", "/ca/failsafe_reason")
         self.declare_parameter("detections_topic", "/camera/detections")
+        self.declare_parameter("preview_prefix", "/ca/thruster_preview")
+        self.declare_parameter("actuator_path_ready_topic", "/ca/actuator_path_ready")
+        self.declare_parameter("actuator_path_ready_timeout_s", 1.0)
         self.declare_parameter("frame_max_age_s", 10.0)
         # Default changed to False per PRD.md section 10 / AGENTS.md section 16:
         # KTI logging should default to numeric metrics, not image snapshots.
@@ -629,6 +643,17 @@ class EventLoggerNode(Node):
             self.on_detections_seen,
             q,
         )
+        prefix = str(self.get_parameter("preview_prefix").value).rstrip("/")
+        self.create_subscription(String, prefix + "/payload", lambda m: self.update_value("preview_payload", m.data), q)
+        self.create_subscription(String, prefix + "/applied_command", lambda m: self.update_value("preview_command", m.data), q)
+        self.create_subscription(Float32, prefix + "/throttle", lambda m: self.update_float("throttle_percent", m.data), q)
+        self.create_subscription(Float32, prefix + "/steering", lambda m: self.update_float("steering_percent", m.data), q)
+        self.create_subscription(Int32, prefix + "/pwm_steering", lambda m: self.update_value("preview_pwm_ch1", int(m.data)), q)
+        self.create_subscription(Int32, prefix + "/pwm_throttle", lambda m: self.update_value("preview_pwm_ch3", int(m.data)), q)
+        self.create_subscription(String, prefix + "/blocked_reason", lambda m: self.update_value("blocked_reason", m.data), q)
+        self.create_subscription(Bool, prefix + "/dry_run", lambda m: self.update_value("dry_run", bool(m.data)), q)
+        self.create_subscription(Bool, prefix + "/hardware_output_enabled", lambda m: self.update_value("hardware_output_enabled", bool(m.data)), q)
+        self.create_subscription(Bool, str(self.get_parameter("actuator_path_ready_topic").value), self.on_actuator_path_ready, q)
 
     def ros_time_sec(self) -> float:
         return float(self.get_clock().now().nanoseconds) * 1.0e-9
@@ -780,10 +805,17 @@ class EventLoggerNode(Node):
             if selected_command is not None:
                 selected_command = str(selected_command).strip()
             self.state["selected_command_metrics"] = selected_command or None
+            self.state["pool_turn_away_policy"] = bool(payload.get("pool_turn_away_policy", False))
+            self.state["obstacle_side"] = str(payload.get("obstacle_side", ""))
 
     def on_avoid_active(self, msg: Bool) -> None:
         with self.lock:
             self.state["avoid_active"] = bool(msg.data)
+
+    def on_actuator_path_ready(self, msg: Bool) -> None:
+        with self.lock:
+            self.state["actuator_path_ready"] = bool(msg.data)
+            self.state["actuator_path_ready_t"] = time.monotonic()
 
     def on_manual_authority(self, msg: Bool) -> None:
         with self.lock:
@@ -808,6 +840,10 @@ class EventLoggerNode(Node):
             # risk/avoid_state/hazard-command is unchanged.
             if c is not None and c.get("first_detection_time_sec") is None:
                 c["first_detection_time_sec"] = now
+
+    def update_value(self, name: str, value: Any) -> None:
+        with self.lock:
+            self.state[name] = value
 
     def update_float(self, name: str, value: Any) -> None:
         try:
@@ -1316,6 +1352,15 @@ class EventLoggerNode(Node):
     def write_timeseries_row(self) -> None:
         s = self.snapshot_state()
 
+        ready_timeout = max(
+            0.01, float(self.get_parameter("actuator_path_ready_timeout_s").value)
+        )
+        ready_fresh = (
+            float(s.get("actuator_path_ready_t", 0.0)) > 0.0
+            and (time.monotonic() - float(s.get("actuator_path_ready_t", 0.0))) <= ready_timeout
+        )
+        logged_actuator_path_ready = bool(s.get("actuator_path_ready")) and ready_fresh
+
         takeover_active_val = s.get("takeover_active")
         if takeover_active_val is None:
             takeover_active_val = s.get("rc_override_enable")
@@ -1387,6 +1432,22 @@ class EventLoggerNode(Node):
             "max_abs_right_cmd": fmt_float(self.session_max_abs_right_cmd, 4),
             "max_abs_diff_cmd": fmt_float(self.session_max_abs_diff_cmd, 4),
             "selected_command": str(selected_command_val),
+            "desired_command": str(s.get("command_raw", "")),
+            "safe_command": str(s.get("command_safe", "")),
+            "preview_command": str(s.get("preview_command", "")),
+            "left_normalized": fmt_float(s.get("left_cmd"), 4),
+            "right_normalized": fmt_float(s.get("right_cmd"), 4),
+            "throttle_percent": fmt_float(s.get("throttle_percent"), 3),
+            "steering_percent": fmt_float(s.get("steering_percent"), 3),
+            "preview_payload": str(s.get("preview_payload", "")),
+            "preview_pwm_ch1": str(s.get("preview_pwm_ch1", "")),
+            "preview_pwm_ch3": str(s.get("preview_pwm_ch3", "")),
+            "actuator_path_ready": fmt_bool(logged_actuator_path_ready),
+            "hardware_output_enabled": fmt_bool(s.get("hardware_output_enabled")),
+            "dry_run": fmt_bool(s.get("dry_run")),
+            "blocked_reason": str(s.get("blocked_reason", "")),
+            "pool_turn_away_policy": fmt_bool(s.get("pool_turn_away_policy")),
+            "obstacle_side": str(s.get("obstacle_side", "")),
         }
         with open(self.timeseries_csv, "a", newline="", encoding="utf-8") as f:
             csv.DictWriter(f, fieldnames=TS_FIELDS).writerow(row)

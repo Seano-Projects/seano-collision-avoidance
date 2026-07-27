@@ -215,6 +215,7 @@ def generate_launch_description():
     safe_command_topic = LaunchConfiguration("safe_command_topic")
     mode_topic = LaunchConfiguration("mode_topic")
     metrics_topic = LaunchConfiguration("metrics_topic")
+    pool_turn_away_policy = LaunchConfiguration("pool_turn_away_policy")
     debug_image_topic = LaunchConfiguration("debug_image_topic")
 
     # -------------------------
@@ -452,7 +453,10 @@ def generate_launch_description():
                 "use_freeze_detector": ParameterValue(use_freeze, value_type=bool),
                 "freeze_topic": freeze_topic,
                 "freeze_reason_topic": freeze_reason_topic,
-                "hud_state_timeout_s": 0.0,
+                "hud_state_timeout_s": 1.0,
+                "pool_turn_away_policy": ParameterValue(
+                    pool_turn_away_policy, value_type=bool
+                ),
             },
         ],
     )
@@ -645,6 +649,7 @@ def generate_launch_description():
             DeclareLaunchArgument("safe_command_topic", default_value="/ca/command_safe"),
             DeclareLaunchArgument("mode_topic", default_value="/ca/mode"),
             DeclareLaunchArgument("metrics_topic", default_value="/ca/metrics"),
+            DeclareLaunchArgument("pool_turn_away_policy", default_value="false"),
             DeclareLaunchArgument("debug_image_topic", default_value="/ca/debug_image"),
             # detector QoS
             DeclareLaunchArgument("det_sub_reliability", default_value="reliable"),

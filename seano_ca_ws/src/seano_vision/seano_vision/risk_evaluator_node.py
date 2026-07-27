@@ -50,7 +50,7 @@ from rclpy.node import Node
 from rclpy.parameter import Parameter
 from rclpy.qos import DurabilityPolicy, HistoryPolicy, QoSProfile, ReliabilityPolicy
 from sensor_msgs.msg import Image
-from std_msgs.msg import Bool, Float32, String
+from std_msgs.msg import Bool, Float32, Int32, String
 from vision_msgs.msg import Detection2DArray
 
 from seano_vision.risk_policy import (
@@ -66,6 +66,7 @@ from seano_vision.risk_policy import (
     normalize_command,
     normalize_source,
 )
+from seano_vision.thruster_preview import select_pool_turn_away_command
 
 try:
     import cv2  # type: ignore
@@ -233,7 +234,10 @@ class RiskEvaluatorNode(Node):
         self.declare_parameter(
             "interface_status_topic", "/seano/fcu_actuator_interface_status"
         )
-        self.declare_parameter("hud_state_timeout_s", 0.0)
+        self.declare_parameter("hud_state_timeout_s", 1.0)
+        self.declare_parameter("thruster_preview_prefix", "/ca/thruster_preview")
+        self.declare_parameter("actuator_path_ready_topic", "/ca/actuator_path_ready")
+        self.declare_parameter("takeover_requested_topic", "/ca/takeover_requested")
 
         self.declare_parameter("publish_debug_image", True)
         self.declare_parameter("min_det_score", 0.35)
@@ -319,6 +323,7 @@ class RiskEvaluatorNode(Node):
 
         self.declare_parameter("prefer_starboard", True)
         self.declare_parameter("emergency_turn_away", True)
+        self.declare_parameter("pool_turn_away_policy", False)
 
         # --------------------------
         # Vision Quality sources
@@ -457,6 +462,11 @@ class RiskEvaluatorNode(Node):
         self.mode_manager_state_t = 0.0
         self.interface_status = ""
         self.interface_status_t = 0.0
+        self.preview_state = {"command": "STALE", "throttle": 0.0, "steering": 0.0,
+                              "pwm_ch1": 1500, "pwm_ch3": 1500, "ready": False,
+                              "reason": "PREVIEW_STALE", "dry_run": True,
+                              "hardware": False, "takeover_requested": False}
+        self.preview_state_t = 0.0
 
         # Mode state machine
         self.mode = "NORMAL"
@@ -606,6 +616,17 @@ class RiskEvaluatorNode(Node):
             self.on_interface_status,
             10,
         )
+        preview_prefix = str(self.get_parameter("thruster_preview_prefix").value).rstrip("/")
+        self.create_subscription(String, preview_prefix + "/applied_command", lambda m: self._preview_update("command", str(m.data)), 10)
+        self.create_subscription(Float32, preview_prefix + "/throttle", lambda m: self._preview_update("throttle", float(m.data)), 10)
+        self.create_subscription(Float32, preview_prefix + "/steering", lambda m: self._preview_update("steering", float(m.data)), 10)
+        self.create_subscription(Int32, preview_prefix + "/pwm_steering", lambda m: self._preview_update("pwm_ch1", int(m.data)), 10)
+        self.create_subscription(Int32, preview_prefix + "/pwm_throttle", lambda m: self._preview_update("pwm_ch3", int(m.data)), 10)
+        self.create_subscription(Bool, preview_prefix + "/ready", lambda m: self._preview_update("ready", bool(m.data)), 10)
+        self.create_subscription(String, preview_prefix + "/blocked_reason", lambda m: self._preview_update("reason", str(m.data)), 10)
+        self.create_subscription(Bool, preview_prefix + "/dry_run", lambda m: self._preview_update("dry_run", bool(m.data)), 10)
+        self.create_subscription(Bool, preview_prefix + "/hardware_output_enabled", lambda m: self._preview_update("hardware", bool(m.data)), 10)
+        self.create_subscription(Bool, str(self.get_parameter("takeover_requested_topic").value), lambda m: self._preview_update("takeover_requested", bool(m.data)), 10)
 
         # timer (failsafe tick)
         hz = float(self.get_parameter("tick_hz").value)
@@ -942,6 +963,10 @@ class RiskEvaluatorNode(Node):
     def on_external_vq(self, msg: Float32) -> None:
         self.vision_quality_external = float(msg.data)
         self.vq_ext_last_t = time.time()
+
+    def _preview_update(self, key: str, value) -> None:
+        self.preview_state[key] = value
+        self.preview_state_t = time.time()
 
     def on_freeze(self, msg: Bool) -> None:
         self.freeze_flag = bool(msg.data)
@@ -1375,9 +1400,32 @@ class RiskEvaluatorNode(Node):
         metrics["raw_command"] = raw_cmd_s
         metrics["safe_command"] = safe_cmd_s
         metrics["selected_command"] = selected_cmd
+        preview_valid = self._topic_valid(self.preview_state_t, now_s)
+        preview = self.preview_state if preview_valid else {
+            "command": "STALE", "throttle": 0.0, "steering": 0.0,
+            "pwm_ch1": 1500, "pwm_ch3": 1500, "ready": False,
+            "reason": "PREVIEW_STALE", "dry_run": True, "hardware": False,
+            "takeover_requested": False,
+        }
+        metrics["preview_command"] = preview["command"]
+        # The preview echo is the closest categorical evidence from the
+        # controller/mux side; keep SAFE separate as watchdog output.
+        if preview_valid:
+            metrics["selected_command"] = str(preview["command"])
+            metrics["command_selected"] = str(preview["command"])
+        metrics["preview_throttle_percent"] = preview["throttle"]
+        metrics["preview_steering_percent"] = preview["steering"]
+        metrics["preview_pwm_ch1"] = preview["pwm_ch1"]
+        metrics["preview_pwm_ch3"] = preview["pwm_ch3"]
+        metrics["actuator_path_ready"] = bool(preview["ready"])
+        metrics["hardware_output_enabled"] = bool(preview["hardware"])
+        metrics["dry_run"] = bool(preview["dry_run"])
+        metrics["blocked_reason"] = str(preview["reason"])
+        metrics["takeover_requested"] = bool(preview["takeover_requested"])
+        metrics["takeover_applied"] = bool(takeover_active and preview["ready"] and preview["hardware"] and not preview["dry_run"])
         metrics["command_raw"] = raw_cmd_s
         metrics["command_safe"] = safe_cmd_s
-        metrics["command_selected"] = selected_cmd
+        metrics["command_selected"] = str(metrics.get("selected_command", selected_cmd))
         metrics["raw_command_source"] = raw_command_source
         metrics["raw_command_latched"] = bool(raw_command_latched)
         metrics["command_source"] = selected_source
@@ -2192,7 +2240,11 @@ class RiskEvaluatorNode(Node):
                     command_source="EMERGENCY_VTTC",
                 )
 
-            desired = cmd_slow if risk >= LOW_RISK_MAX else cmd_hold
+            desired = (
+                cmd_stop
+                if bool(self.get_parameter("pool_turn_away_policy").value)
+                else (cmd_slow if risk >= LOW_RISK_MAX else cmd_hold)
+            )
             metrics["vision_guard"] = "vq_below_vq_min"
             metrics["reason_codes"] = reason_codes + ["VQ_BELOW_MIN"]
             metrics["dominant_factor"] = self._dominant_factor(metrics.get("components", {}))
@@ -2232,6 +2284,38 @@ class RiskEvaluatorNode(Node):
         very_close = area_ratio >= (near_area_ratio * 1.2)
         urgent_vttc = (vttc is not None) and (float(vttc) <= vttc_turn_th)
         emergency_vttc = (vttc is not None) and (float(vttc) <= vttc_stop_th)
+
+        if bool(self.get_parameter("pool_turn_away_policy").value):
+            pool = select_pool_turn_away_command(
+                risk=risk,
+                x_ratio=x_ratio,
+                center_band_ratio=float(self.get_parameter("center_band_ratio").value),
+                slow_threshold=risk_slow_th,
+                turn_threshold=risk_turn_th,
+                stop_threshold=risk_stop_th,
+                very_close=very_close or emergency_vttc,
+            )
+            metrics["pool_turn_away_policy"] = True
+            metrics["obstacle_side"] = pool.obstacle_side
+            metrics["decision"] = {
+                "x_ratio": float(x_ratio),
+                "obstacle_side": pool.obstacle_side,
+                "direction": pool.selected_direction,
+                "desired_cmd": pool.command,
+                "policy_profile": "POOL_TURN_AWAY",
+            }
+            metrics["reason_codes"] = reason_codes + [pool.reason]
+            metrics["dominant_factor"] = self._dominant_factor(metrics.get("components", {}))
+            self.get_logger().info(
+                f"POOL_TURN_AWAY x_ratio={x_ratio:.3f} obstacle_side={pool.obstacle_side} "
+                f"selected_direction={pool.selected_direction} selected_command={pool.command} "
+                "policy_profile=POOL_TURN_AWAY",
+                throttle_duration_sec=1.0,
+            )
+            source = "EMERGENCY" if pool.command == cmd_stop and risk >= risk_stop_th else "POLICY"
+            return self._apply_desired_command_policy(
+                t, pool.command, risk, hold_s, metrics, command_source=source
+            )
 
         if emergency_vttc:
             reason_codes.append("VTTC_EMERGENCY")
@@ -2681,8 +2765,35 @@ class RiskEvaluatorNode(Node):
         source_age = float(metrics.get("source_age_s", 0.0))
 
         lines: List[str] = []
-        lines.append(f"CMD: {cmd_selected}   RAW: {cmd_raw}")
-        lines.append(f"SAFE: {cmd_safe}   MGR: {mgr_state}")
+        preview_cmd = _ascii_safe(str(metrics.get("preview_command", "STALE")).replace("_", " "))
+        preview_throttle = float(metrics.get("preview_throttle_percent", 0.0))
+        preview_steering = float(metrics.get("preview_steering_percent", 0.0))
+        preview_left = (preview_throttle + preview_steering) / 100.0
+        preview_right = (preview_throttle - preview_steering) / 100.0
+        actuator_ready = bool(metrics.get("actuator_path_ready", False))
+        hardware_output = bool(metrics.get("hardware_output_enabled", False))
+        dry_run = bool(metrics.get("dry_run", True))
+        takeover_requested = bool(metrics.get("takeover_requested", False))
+        takeover_applied = bool(metrics.get("takeover_applied", False))
+        blocked_reason = _ascii_safe(str(metrics.get("blocked_reason", "ACTUATOR_PATH_NOT_READY")))
+        lines.append(f"DESIRED: {cmd_raw}   SAFE: {cmd_safe}")
+        lines.append(f"SELECTED: {cmd_selected}   PREVIEW: {preview_cmd}")
+        lines.append(
+            f"ACTUATOR READY: {'TRUE' if actuator_ready else 'FALSE'}   "
+            f"HARDWARE OUTPUT: {'DRY RUN' if dry_run else ('ON' if hardware_output else 'OFF')}"
+        )
+        lines.append(f"LEFT: {preview_left:.3f}   RIGHT: {preview_right:.3f}")
+        lines.append(f"THROTTLE %: {preview_throttle:.1f}   STEERING %: {preview_steering:.1f}")
+        lines.append(
+            f"PWM CH1: {int(metrics.get('preview_pwm_ch1', 1500))}   "
+            f"PWM CH3: {int(metrics.get('preview_pwm_ch3', 1500))}"
+        )
+        lines.append(
+            f"TAKEOVER REQUESTED: {'YES' if takeover_requested else 'NO'}   "
+            f"TAKEOVER APPLIED: {'YES' if takeover_applied else 'BLOCKED'}"
+        )
+        lines.append(f"BLOCKED REASON: {blocked_reason if not actuator_ready else '--'}")
+        lines.append(f"MGR: {mgr_state}")
         lines.append(
             f"CMD_SRC: {command_source}   LATCH: {'TRUE' if command_latched else 'FALSE'}   "
             f"POLICY: {'OK' if command_policy_valid else 'VIOL'}"

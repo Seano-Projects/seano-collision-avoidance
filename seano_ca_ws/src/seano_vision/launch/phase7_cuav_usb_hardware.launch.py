@@ -14,8 +14,13 @@
 #
 
 from launch import LaunchDescription
-from launch.actions import DeclareLaunchArgument, ExecuteProcess, IncludeLaunchDescription
+from launch.actions import (
+    DeclareLaunchArgument, EmitEvent, ExecuteProcess, IncludeLaunchDescription,
+    RegisterEventHandler, TimerAction,
+)
 from launch.conditions import IfCondition
+from launch.event_handlers import OnProcessExit
+from launch.events import Shutdown
 from launch.launch_description_sources import (
     AnyLaunchDescriptionSource,
     PythonLaunchDescriptionSource,
@@ -70,6 +75,20 @@ def _all_true(*subs):
     return PythonExpression(expr)
 
 
+def _any_true(*subs):
+    expr = ["'true' if ("]
+    for i, sub in enumerate(subs):
+        if i > 0:
+            expr.append(" or ")
+        expr.extend(["'", sub, "'.lower() == 'true'"])
+    expr.append(") else 'false'")
+    return PythonExpression(expr)
+
+
+def _not_true(sub):
+    return PythonExpression(["'false' if '", sub, "'.lower() == 'true' else 'true'"])
+
+
 def _camera_launch_is(use_camera, camera_launch, filename):
     return PythonExpression(
         [
@@ -115,6 +134,87 @@ def generate_launch_description():
     use_takeover_manager = LaunchConfiguration("use_takeover_manager")
     use_mode_manager = LaunchConfiguration("use_mode_manager")
     use_rc_override_bridge = LaunchConfiguration("use_rc_override_bridge")
+    use_thruster_adapter_preview = LaunchConfiguration("use_thruster_adapter_preview")
+    publish_thruster_preview_actuator_path_ready = LaunchConfiguration(
+        "publish_thruster_preview_actuator_path_ready"
+    )
+    pool_turn_away_policy = LaunchConfiguration("pool_turn_away_policy")
+    require_actuator_path_ready = LaunchConfiguration("require_actuator_path_ready")
+    thruster_preview_dry_run = LaunchConfiguration("thruster_preview_dry_run")
+    external_interface_confirmed = LaunchConfiguration("external_interface_confirmed")
+    external_arbitration_confirmed = LaunchConfiguration("external_arbitration_confirmed")
+    hardware_output_enabled = LaunchConfiguration("hardware_output_enabled")
+    use_guarded_thruster_test_adapter = LaunchConfiguration("use_guarded_thruster_test_adapter")
+    use_thruster_test_guardian = LaunchConfiguration("use_thruster_test_guardian")
+    use_thruster_test_hud = LaunchConfiguration("use_thruster_test_hud")
+    hardware_test_enabled = LaunchConfiguration("hardware_test_enabled")
+    mqtt_publish_enabled = LaunchConfiguration("mqtt_publish_enabled")
+    hardware_test_operator_confirmed = LaunchConfiguration("hardware_test_operator_confirmed")
+    shared_mqtt_test_confirmed = LaunchConfiguration("shared_mqtt_test_confirmed")
+    tether_confirmed = LaunchConfiguration("tether_confirmed")
+    emergency_stop_confirmed = LaunchConfiguration("emergency_stop_confirmed")
+    exclusive_test_window_confirmed = LaunchConfiguration("exclusive_test_window_confirmed")
+    hardware_test_session_id = LaunchConfiguration("hardware_test_session_id")
+    hardware_test_log_dir = LaunchConfiguration("hardware_test_log_dir")
+    hardware_test_required_fcu_mode = LaunchConfiguration("hardware_test_required_fcu_mode")
+    hardware_test_maximum_throttle_percent = LaunchConfiguration("hardware_test_maximum_throttle_percent")
+    hardware_test_maximum_allowed_throttle_percent = LaunchConfiguration(
+        "hardware_test_maximum_allowed_throttle_percent"
+    )
+    hardware_test_mapping_profile = LaunchConfiguration(
+        "hardware_test_mapping_profile"
+    )
+    hardware_test_cruise_reference_throttle_percent = LaunchConfiguration(
+        "hardware_test_cruise_reference_throttle_percent"
+    )
+    hardware_test_slow_factor = LaunchConfiguration("hardware_test_slow_factor")
+    hardware_test_slow_throttle_percent = LaunchConfiguration("hardware_test_slow_throttle_percent")
+    hardware_test_minimum_effective_throttle_percent = LaunchConfiguration(
+        "hardware_test_minimum_effective_throttle_percent"
+    )
+    hardware_test_turn_throttle_percent = LaunchConfiguration(
+        "hardware_test_turn_throttle_percent"
+    )
+    hardware_test_neutral_throttle_pwm = LaunchConfiguration(
+        "hardware_test_neutral_throttle_pwm"
+    )
+    hardware_test_maximum_steering_percent = LaunchConfiguration("hardware_test_maximum_steering_percent")
+    hardware_test_maximum_allowed_steering_percent = LaunchConfiguration(
+        "hardware_test_maximum_allowed_steering_percent"
+    )
+    hardware_test_steering_channel_index = LaunchConfiguration(
+        "hardware_test_steering_channel_index"
+    )
+    hardware_test_throttle_channel_index = LaunchConfiguration(
+        "hardware_test_throttle_channel_index"
+    )
+    hardware_test_pwm_min = LaunchConfiguration("hardware_test_pwm_min")
+    hardware_test_pwm_max = LaunchConfiguration("hardware_test_pwm_max")
+    hardware_test_command_timeout_s = LaunchConfiguration("hardware_test_command_timeout_s")
+    hardware_test_heartbeat_timeout_s = LaunchConfiguration("hardware_test_heartbeat_timeout_s")
+    hardware_test_maximum_motion_duration_s = LaunchConfiguration("hardware_test_maximum_motion_duration_s")
+    hardware_test_startup_grace_period_s = LaunchConfiguration("hardware_test_startup_grace_period_s")
+    hardware_test_web_video_available = LaunchConfiguration("hardware_test_web_video_available")
+    hardware_test_command_topic = LaunchConfiguration("hardware_test_command_topic")
+    hardware_test_bounded_stop_neutral = LaunchConfiguration(
+        "hardware_test_bounded_stop_neutral"
+    )
+    hardware_test_neutral_repetitions = LaunchConfiguration(
+        "hardware_test_neutral_repetitions"
+    )
+    hardware_test_release_repetitions = LaunchConfiguration(
+        "hardware_test_release_repetitions"
+    )
+    hardware_test_hold_stop_on_failsafe = LaunchConfiguration(
+        "hardware_test_hold_stop_on_failsafe"
+    )
+    hardware_test_release_without_extra_neutral = LaunchConfiguration(
+        "hardware_test_release_without_extra_neutral"
+    )
+    effective_require_actuator_path_ready = _any_true(
+        use_thruster_adapter_preview, require_actuator_path_ready,
+        use_guarded_thruster_test_adapter, use_thruster_test_guardian
+    )
 
     master_enable_on_start = LaunchConfiguration("master_enable_on_start")
     failsafe_stale_is_active = LaunchConfiguration("failsafe_stale_is_active")
@@ -400,6 +500,7 @@ def generate_launch_description():
             "det_publish_empty_detections": ca_det_publish_empty_detections,
             "wd_startup_grace_s": wd_startup_grace_s,
             "wd_start_in_failsafe": wd_start_in_failsafe,
+            "pool_turn_away_policy": pool_turn_away_policy,
         }.items(),
     )
 
@@ -519,6 +620,9 @@ def generate_launch_description():
                 "master_enable_topic": "/seano/auto_master_enable",
                 "master_enable_on_start": ParameterValue(master_enable_on_start, value_type=bool),
                 "master_auto_enable_after_startup": False,
+                "require_actuator_path_ready": ParameterValue(
+                    effective_require_actuator_path_ready, value_type=bool
+                ),
                 "cruise_speed": ParameterValue(cruise_speed, value_type=float),
                 "slow_factor": ParameterValue(slow_factor, value_type=float),
                 "turn_speed_factor": ParameterValue(turn_speed_factor, value_type=float),
@@ -548,8 +652,173 @@ def generate_launch_description():
                 "switch_to_failsafe_on_failsafe": True,
                 "restore_after_failsafe_if_clear": True,
                 "min_mode_switch_interval_s": 1.0,
+                "require_actuator_path_ready": ParameterValue(
+                    effective_require_actuator_path_ready, value_type=bool
+                ),
             }
         ],
+    )
+
+    thruster_preview = Node(
+        package="seano_vision",
+        executable="thruster_adapter_preview_node",
+        name="thruster_adapter_preview_node",
+        output="screen",
+        condition=IfCondition(_all_true(use_ca_pipeline, use_thruster_adapter_preview)),
+        parameters=[{
+            "enabled": True,
+            "dry_run": ParameterValue(thruster_preview_dry_run, value_type=bool),
+            "external_interface_confirmed": ParameterValue(
+                external_interface_confirmed, value_type=bool
+            ),
+            "external_arbitration_confirmed": ParameterValue(
+                external_arbitration_confirmed, value_type=bool
+            ),
+            "hardware_output_enabled": ParameterValue(hardware_output_enabled, value_type=bool),
+            "publish_actuator_path_ready": ParameterValue(
+                _all_true(
+                    _not_true(use_thruster_test_guardian),
+                    publish_thruster_preview_actuator_path_ready,
+                ),
+                value_type=bool,
+            ),
+        }],
+    )
+
+    hardware_guardian = Node(
+        package="seano_vision",
+        executable="thruster_test_safety_guardian_node",
+        name="thruster_test_safety_guardian_node",
+        output="screen",
+        condition=IfCondition(_all_true(use_ca_pipeline, use_thruster_test_guardian)),
+        parameters=[{
+            "hardware_test_enabled": ParameterValue(hardware_test_enabled, value_type=bool),
+            "mqtt_publish_enabled": ParameterValue(mqtt_publish_enabled, value_type=bool),
+            "operator_confirmed": ParameterValue(hardware_test_operator_confirmed, value_type=bool),
+            "shared_mqtt_test_confirmed": ParameterValue(shared_mqtt_test_confirmed, value_type=bool),
+            "tether_confirmed": ParameterValue(tether_confirmed, value_type=bool),
+            "emergency_stop_confirmed": ParameterValue(emergency_stop_confirmed, value_type=bool),
+            "exclusive_test_window_confirmed": ParameterValue(exclusive_test_window_confirmed, value_type=bool),
+            "foreign_command_monitor_enabled": True,
+            "reverse_allowed": False,
+            "maximum_throttle_percent": ParameterValue(hardware_test_maximum_throttle_percent, value_type=float),
+            "maximum_steering_percent": ParameterValue(hardware_test_maximum_steering_percent, value_type=float),
+            "command_timeout_s": ParameterValue(hardware_test_command_timeout_s, value_type=float),
+            "heartbeat_timeout_s": ParameterValue(hardware_test_heartbeat_timeout_s, value_type=float),
+            "maximum_motion_duration_s": ParameterValue(hardware_test_maximum_motion_duration_s, value_type=float),
+            "startup_grace_period_s": ParameterValue(hardware_test_startup_grace_period_s, value_type=float),
+            "web_video_available": ParameterValue(hardware_test_web_video_available, value_type=bool),
+            "mqtt_qos": 1,
+            "mqtt_retain": False,
+            "session_id": hardware_test_session_id,
+            "log_dir": hardware_test_log_dir,
+            "required_fcu_mode": hardware_test_required_fcu_mode,
+        }],
+    )
+
+    hardware_adapter_node = Node(
+        package="seano_vision",
+        executable="guarded_thruster_test_adapter_node",
+        name="guarded_thruster_test_adapter_node",
+        output="screen",
+        condition=IfCondition(_all_true(use_ca_pipeline, use_guarded_thruster_test_adapter)),
+        parameters=[{
+            "hardware_test_enabled": ParameterValue(hardware_test_enabled, value_type=bool),
+            "mqtt_publish_enabled": ParameterValue(mqtt_publish_enabled, value_type=bool),
+            "operator_confirmed": ParameterValue(hardware_test_operator_confirmed, value_type=bool),
+            "shared_mqtt_test_confirmed": ParameterValue(shared_mqtt_test_confirmed, value_type=bool),
+            "tether_confirmed": ParameterValue(tether_confirmed, value_type=bool),
+            "emergency_stop_confirmed": ParameterValue(emergency_stop_confirmed, value_type=bool),
+            "exclusive_test_window_confirmed": ParameterValue(exclusive_test_window_confirmed, value_type=bool),
+            "foreign_command_monitor_enabled": True,
+            "reverse_allowed": False,
+            "mapping_profile": hardware_test_mapping_profile,
+            "maximum_throttle_percent": ParameterValue(hardware_test_maximum_throttle_percent, value_type=float),
+            "maximum_allowed_throttle_percent": ParameterValue(
+                hardware_test_maximum_allowed_throttle_percent,
+                value_type=float,
+            ),
+            "cruise_reference_throttle_percent": ParameterValue(
+                hardware_test_cruise_reference_throttle_percent,
+                value_type=float,
+            ),
+            "slow_factor": ParameterValue(hardware_test_slow_factor, value_type=float),
+            "slow_throttle_percent": ParameterValue(hardware_test_slow_throttle_percent, value_type=float),
+            "minimum_effective_throttle_percent": ParameterValue(
+                hardware_test_minimum_effective_throttle_percent,
+                value_type=float,
+            ),
+            "turn_throttle_percent": ParameterValue(
+                hardware_test_turn_throttle_percent, value_type=float
+            ),
+            "neutral_throttle_pwm": ParameterValue(
+                hardware_test_neutral_throttle_pwm, value_type=int
+            ),
+            "maximum_steering_percent": ParameterValue(hardware_test_maximum_steering_percent, value_type=float),
+            "maximum_allowed_steering_percent": ParameterValue(
+                hardware_test_maximum_allowed_steering_percent,
+                value_type=float,
+            ),
+            "steering_channel_index": ParameterValue(
+                hardware_test_steering_channel_index, value_type=int
+            ),
+            "throttle_channel_index": ParameterValue(
+                hardware_test_throttle_channel_index, value_type=int
+            ),
+            "pwm_min": ParameterValue(
+                hardware_test_pwm_min, value_type=int
+            ),
+            "pwm_max": ParameterValue(
+                hardware_test_pwm_max, value_type=int
+            ),
+            "command_timeout_s": ParameterValue(hardware_test_command_timeout_s, value_type=float),
+            "heartbeat_timeout_s": ParameterValue(hardware_test_heartbeat_timeout_s, value_type=float),
+            "maximum_motion_duration_s": ParameterValue(hardware_test_maximum_motion_duration_s, value_type=float),
+            "mqtt_qos": 1,
+            "mqtt_retain": False,
+            "session_id": hardware_test_session_id,
+            "log_dir": hardware_test_log_dir,
+            "command_topic": hardware_test_command_topic,
+            "bounded_stop_neutral": ParameterValue(
+                hardware_test_bounded_stop_neutral, value_type=bool
+            ),
+            "neutral_repetitions": ParameterValue(
+                hardware_test_neutral_repetitions, value_type=int
+            ),
+            "release_repetitions": ParameterValue(
+                hardware_test_release_repetitions, value_type=int
+            ),
+            "hold_stop_on_failsafe": ParameterValue(
+                hardware_test_hold_stop_on_failsafe, value_type=bool
+            ),
+            "release_without_extra_neutral": ParameterValue(
+                hardware_test_release_without_extra_neutral,
+                value_type=bool,
+            ),
+        }],
+    )
+    hardware_adapter = TimerAction(period=2.0, actions=[hardware_adapter_node])
+
+    guardian_exit_shutdown = RegisterEventHandler(
+        OnProcessExit(
+            target_action=hardware_guardian,
+            on_exit=[EmitEvent(event=Shutdown(reason="hardware-test guardian exited"))],
+        ),
+        condition=IfCondition(use_thruster_test_guardian),
+    )
+
+    hardware_hud = Node(
+        package="seano_vision",
+        executable="thruster_test_hud_node",
+        name="thruster_test_hud_node",
+        output="screen",
+        condition=IfCondition(
+            _all_true(
+                use_ca_pipeline,
+                use_guarded_thruster_test_adapter,
+                use_thruster_test_hud,
+            )
+        ),
     )
 
     # ------------------------------------------------------------------
@@ -667,6 +936,97 @@ def generate_launch_description():
         DeclareLaunchArgument("use_ca_pipeline", default_value="true"),
         DeclareLaunchArgument("use_takeover_manager", default_value="true"),
         DeclareLaunchArgument("use_mode_manager", default_value="true"),
+        DeclareLaunchArgument("use_thruster_adapter_preview", default_value="false"),
+        DeclareLaunchArgument(
+            "publish_thruster_preview_actuator_path_ready",
+            default_value="true",
+        ),
+        DeclareLaunchArgument("pool_turn_away_policy", default_value="false"),
+        DeclareLaunchArgument("require_actuator_path_ready", default_value="false"),
+        DeclareLaunchArgument("thruster_preview_dry_run", default_value="true"),
+        DeclareLaunchArgument("external_interface_confirmed", default_value="false"),
+        DeclareLaunchArgument("external_arbitration_confirmed", default_value="false"),
+        DeclareLaunchArgument("hardware_output_enabled", default_value="false"),
+        DeclareLaunchArgument("use_guarded_thruster_test_adapter", default_value="false"),
+        DeclareLaunchArgument("use_thruster_test_guardian", default_value="false"),
+        DeclareLaunchArgument("use_thruster_test_hud", default_value="true"),
+        DeclareLaunchArgument("hardware_test_enabled", default_value="false"),
+        DeclareLaunchArgument("mqtt_publish_enabled", default_value="false"),
+        DeclareLaunchArgument("hardware_test_operator_confirmed", default_value="false"),
+        DeclareLaunchArgument("shared_mqtt_test_confirmed", default_value="false"),
+        DeclareLaunchArgument("tether_confirmed", default_value="false"),
+        DeclareLaunchArgument("emergency_stop_confirmed", default_value="false"),
+        DeclareLaunchArgument("exclusive_test_window_confirmed", default_value="false"),
+        DeclareLaunchArgument("hardware_test_session_id", default_value=""),
+        DeclareLaunchArgument("hardware_test_log_dir", default_value=""),
+        DeclareLaunchArgument("hardware_test_required_fcu_mode", default_value="MANUAL"),
+        DeclareLaunchArgument("hardware_test_maximum_throttle_percent", default_value="10.0"),
+        DeclareLaunchArgument(
+            "hardware_test_maximum_allowed_throttle_percent",
+            default_value="10.0",
+        ),
+        DeclareLaunchArgument(
+            "hardware_test_mapping_profile",
+            default_value="LEGACY_CONSERVATIVE",
+        ),
+        DeclareLaunchArgument(
+            "hardware_test_cruise_reference_throttle_percent",
+            default_value="20.0",
+        ),
+        DeclareLaunchArgument("hardware_test_slow_factor", default_value="0.5"),
+        DeclareLaunchArgument("hardware_test_slow_throttle_percent", default_value="10.0"),
+        DeclareLaunchArgument(
+            "hardware_test_minimum_effective_throttle_percent",
+            default_value="10.0",
+        ),
+        DeclareLaunchArgument(
+            "hardware_test_turn_throttle_percent", default_value="10.0"
+        ),
+        DeclareLaunchArgument(
+            "hardware_test_neutral_throttle_pwm", default_value="1500"
+        ),
+        DeclareLaunchArgument("hardware_test_maximum_steering_percent", default_value="15.0"),
+        DeclareLaunchArgument(
+            "hardware_test_maximum_allowed_steering_percent",
+            default_value="15.0",
+        ),
+        DeclareLaunchArgument(
+            "hardware_test_steering_channel_index", default_value="0"
+        ),
+        DeclareLaunchArgument(
+            "hardware_test_throttle_channel_index", default_value="2"
+        ),
+        DeclareLaunchArgument("hardware_test_pwm_min", default_value="1000"),
+        DeclareLaunchArgument("hardware_test_pwm_max", default_value="2000"),
+        DeclareLaunchArgument("hardware_test_command_timeout_s", default_value="0.30"),
+        DeclareLaunchArgument("hardware_test_heartbeat_timeout_s", default_value="0.50"),
+        DeclareLaunchArgument("hardware_test_maximum_motion_duration_s", default_value="2.0"),
+        DeclareLaunchArgument("hardware_test_startup_grace_period_s", default_value="8.0"),
+        DeclareLaunchArgument("hardware_test_web_video_available", default_value="false"),
+        DeclareLaunchArgument(
+            "hardware_test_command_topic",
+            default_value="/ca/command_safe",
+        ),
+        DeclareLaunchArgument(
+            "hardware_test_bounded_stop_neutral",
+            default_value="false",
+        ),
+        DeclareLaunchArgument(
+            "hardware_test_neutral_repetitions",
+            default_value="3",
+        ),
+        DeclareLaunchArgument(
+            "hardware_test_release_repetitions",
+            default_value="3",
+        ),
+        DeclareLaunchArgument(
+            "hardware_test_hold_stop_on_failsafe",
+            default_value="false",
+        ),
+        DeclareLaunchArgument(
+            "hardware_test_release_without_extra_neutral",
+            default_value="false",
+        ),
         DeclareLaunchArgument(
             "use_rc_override_bridge",
             default_value="true",
@@ -889,6 +1249,11 @@ def generate_launch_description():
         bridge,
         takeover,
         mode_mgr,
+        thruster_preview,
+        hardware_guardian,
+        guardian_exit_shutdown,
+        hardware_adapter,
+        hardware_hud,
         event_logger,
         bag_record,
     ]
