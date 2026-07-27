@@ -63,3 +63,7 @@ seano_ca_ws/.last_*_dir
 *.bak_engine_*
 free_before.txt
 *.zip
+/runtime_artifacts/
+/.agents/
+/.claude/
+/.codex/

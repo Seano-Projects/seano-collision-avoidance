@@ -13,7 +13,11 @@
     "**/evidence_phase7": true,
     "**/*.zip": true,
     "**/*.bak": true,
-    "**/*.tmp": true
+    "**/*.tmp": true,
+    "**/runtime_artifacts": true,
+    "**/.agents": true,
+    "**/.claude": true,
+    "**/.codex": true
   },
   "search.exclude": {
     "**/build": true,
@@ -22,6 +26,10 @@
     "**/__pycache__": true,
     "**/.pytest_cache": true,
     "**/.mypy_cache": true,
-    "**/evidence_phase7": true
+    "**/evidence_phase7": true,
+    "**/runtime_artifacts": true,
+    "**/.agents": true,
+    "**/.claude": true,
+    "**/.codex": true
   }
 }
