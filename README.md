@@ -22,6 +22,27 @@ This repository contains a ROS 2 Humble workspace for camera-based obstacle perc
 | Runtime output | `runtime_artifacts/<RUN_ID>/` |
 | Default profile | Safe preview baseline with hardware output disabled |
 
+## TensorRT Inference
+
+The current operational profiles use a locally generated TensorRT engine:
+
+~~~text
+yolov8n.engine
+FP16
+416 × 416
+batch 1
+~~~
+
+The engine is generated directly on the target Jetson because TensorRT engine compatibility depends on the GPU, CUDA, and TensorRT versions.
+
+The tracked `yolov8n.pt` file remains the source model. The generated `yolov8n.engine` file is excluded from Git and must exist locally at:
+
+~~~text
+seano_ca_ws/src/seano_vision/models/yolov8n.engine
+~~~
+
+The three operational profiles explicitly select this TensorRT engine with `imgsz=416` and FP16 inference.
+
 ## Operating Profiles
 
 The profiles below are separate and must not run at the same time.

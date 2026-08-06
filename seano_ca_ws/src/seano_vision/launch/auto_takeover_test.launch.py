@@ -117,6 +117,9 @@ def generate_launch_description():
             "use_event_logger": "true",
             "event_log_root": event_log_root,
             "event_run_id": event_run_id,
+            "ca_det_model_path": "yolov8n.engine",
+            "ca_det_imgsz": "416",
+            "ca_det_half": "true",
             "ca_det_publish_annotated": "false",
         }.items(),
     )

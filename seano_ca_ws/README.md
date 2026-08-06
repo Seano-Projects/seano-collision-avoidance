@@ -6,6 +6,24 @@ The previous workspace README described an older direct RC-override architecture
 
 See the repository root `README.md` for the complete architecture, safety boundary, and operating procedures.
 
+## TensorRT Model
+
+The operational entry points use the locally generated model:
+
+~~~text
+src/seano_vision/models/yolov8n.engine
+~~~
+
+Runtime configuration:
+
+~~~text
+precision: FP16
+input size: 416 × 416
+batch size: 1
+~~~
+
+The `.engine` file is generated on the target Jetson and is not stored in Git. The tracked `yolov8n.pt` file remains the source model used to rebuild the engine.
+
 ## Entry Points
 
 | Script | Current role |

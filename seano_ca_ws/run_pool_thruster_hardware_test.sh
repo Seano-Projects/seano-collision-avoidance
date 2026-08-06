@@ -491,6 +491,9 @@ ros2 launch seano_vision phase7_cuav_usb_hardware.launch.py \
   event_log_root:="$EVENT_LOG_ROOT" \
   event_run_id:="$RUN_ID" \
   record:=false \
+  ca_det_model_path:=yolov8n.engine \
+  ca_det_imgsz:=416 \
+  ca_det_half:=true \
   ca_det_publish_annotated:=false \
   master_enable_on_start:=true \
   actuator_interface_supported:=false \
