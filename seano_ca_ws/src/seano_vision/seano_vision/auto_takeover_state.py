@@ -400,6 +400,19 @@ class AutoTakeoverCore:
         self.blocked_reason = self.abort_reason
         self._mode_action = ""
 
+    def _enter_operator_override(self, now: float, reason: str) -> None:
+        """Relinquish CA ownership without making operator intervention fatal."""
+        previous_state = self.state
+        self.reset_cycle_state(now)
+        self.state = "OPERATOR_OVERRIDE"
+        self.blocked_reason = str(reason)
+        self._event(
+            "OPERATOR_OVERRIDE_ENTERED",
+            now,
+            reason=str(reason),
+            previous_state=previous_state,
+        )
+
     def _event(self, event: str, now: float, **data: Any) -> None:
         self.last_event = str(event)
         self._events.append(
@@ -868,96 +881,226 @@ class AutoTakeoverCore:
         if self.state == "ABORTED":
             return self.output(data)
 
+        # Operator authority is non-terminal. MANUAL selection, DISARM, or
+        # another operator-selected mode immediately removes CA ownership.
+        # CA remains alive and may monitor again after AUTO + ARMED returns.
+        operator_preemptible_states = {
+            "AUTO_MISSION_MONITORING",
+            "TAKEOVER_REQUESTED",
+            "WAITING_FOR_MANUAL_CONFIRMATION",
+            "AVOIDANCE_READY",
+            "MOTION_COMMAND_PENDING",
+            "MOTION_ACTIVE",
+            "STOP_ACTIVE",
+            "SAFE_NEUTRAL_WAIT_CLEAR",
+            "CLEAR_HOLD",
+            "NEUTRALIZING",
+            "RELEASING_CONTROL",
+            "RELEASE_FINAL_NEUTRAL",
+            "RELEASE_FINAL_ATTEMPT",
+            "AUTO_RESTORE_REQUESTED",
+            "WAITING_FOR_AUTO_CONFIRMATION",
+            "AUTO_RESTORE_RETRY",
+            "SAFE_MANUAL_WAIT_AUTO",
+            "AUTO_REJOIN_VERIFY",
+        }
+
+        manual_control_states = {
+            "AVOIDANCE_READY",
+            "MOTION_COMMAND_PENDING",
+            "MOTION_ACTIVE",
+            "STOP_ACTIVE",
+            "SAFE_NEUTRAL_WAIT_CLEAR",
+            "CLEAR_HOLD",
+            "NEUTRALIZING",
+            "RELEASING_CONTROL",
+            "RELEASE_FINAL_NEUTRAL",
+            "RELEASE_FINAL_ATTEMPT",
+        }
+
+        restore_states = {
+            "AUTO_RESTORE_REQUESTED",
+            "WAITING_FOR_AUTO_CONFIRMATION",
+            "AUTO_RESTORE_RETRY",
+            "SAFE_MANUAL_WAIT_AUTO",
+        }
+
+        mode = self._mode(data.fcu_mode)
+
+        # Operator intervention dan safety fault adalah dua hal berbeda.
+        #
+        # MANUAL, DISARM, atau mode yang dipilih operator bersifat
+        # recoverable. Namun ketika CA sedang mengambil, memiliki,
+        # atau memulihkan control authority, fault pada FCU connection,
+        # MQTT, adapter, RC path, foreign publisher, dan adapter fault
+        # tetap harus fail-closed.
+        safety_owned_states = (
+            restore_states
+            | {
+                "AUTO_REJOIN_VERIFY",
+            }
+        )
+
+        if self.state in safety_owned_states:
+            safety_fault = self._restore_path_fault(data)
+
+            # DISARM adalah operator authority / safety action,
+            # sehingga tidak dibuat terminal.
+            if safety_fault and safety_fault != "FCU_DISARMED":
+                self._abort(safety_fault)
+                return self.output(data)
+
+        if self.state in operator_preemptible_states:
+            # Hilangnya koneksi FCU tidak membunuh proses CA.
+            # Sistem melepaskan authority dan menunggu FCU kembali.
+            if not data.fcu_connected:
+                self._enter_operator_override(now, "WAIT_FCU_CONNECTION")
+                return self.output(data)
+
+            # DISARM is an operator/safety action, not a permanent CA failure.
+            if not data.fcu_armed:
+                self._enter_operator_override(now, "WAIT_OPERATOR_ARM")
+                return self.output(data)
+
+            # While CA is only monitoring AUTO, any mode change belongs
+            # to the operator.
+            if self.state == "AUTO_MISSION_MONITORING" and mode != "AUTO":
+                self._enter_operator_override(now, "WAIT_OPERATOR_AUTO")
+                return self.output(data)
+
+            # Once CA owns MANUAL for avoidance, a different mode means
+            # the operator has taken authority back.
+            if self.state in manual_control_states and mode != "MANUAL":
+                self._enter_operator_override(now, "WAIT_OPERATOR_AUTO")
+                return self.output(data)
+
+            # AUTO had already been observed; going back to MANUAL here is
+            # operator intervention and must not trigger another AUTO request.
+            if self.state == "AUTO_REJOIN_VERIFY" and mode == "MANUAL":
+                self._enter_operator_override(now, "WAIT_OPERATOR_AUTO")
+                return self.output(data)
+
+            # During AUTO restore, operator-selected RTL/HOLD/LOITER/etc.
+            # must win without killing the CA process.
+            if self.state in restore_states and mode not in {"AUTO", "MANUAL"}:
+                self._enter_operator_override(now, "WAIT_OPERATOR_AUTO")
+                return self.output(data)
+
+            # If AUTO appears before the normal CA restore handshake is valid,
+            # treat it as external/operator authority rather than terminal abort.
+            if (
+                self.state in restore_states
+                and mode == "AUTO"
+                and not self._auto_confirmation_valid(data)
+            ):
+                self._enter_operator_override(now, "WAIT_OPERATOR_AUTO")
+                return self.output(data)
+
+            if (
+                self.state
+                in {"TAKEOVER_REQUESTED", "WAITING_FOR_MANUAL_CONFIRMATION"}
+                and mode not in {"AUTO", "MANUAL"}
+            ):
+                self._enter_operator_override(now, "WAIT_OPERATOR_AUTO")
+                return self.output(data)
+
         if self.state == "STARTING":
+            # Startup grace hanya memberi waktu node CA/HUD/watchdog hidup.
+            # Kondisi mode dan arm FCU tidak menjadi syarat untuk menyalakan CA.
             self.blocked_reason = (
                 "STARTUP_GRACE"
                 if data.web_video_available
                 else "HUD_WEB_VIDEO_UNAVAILABLE"
             )
+
             if now - self.started_at >= self.startup_grace_s:
-                fault_reason = self._failsafe_stop_reason(data)
-                if (
-                    data.fcu_connected
-                    and data.fcu_armed
-                    and self._mode(data.fcu_mode) == "AUTO"
-                    and fault_reason
-                ):
-                    self._begin_takeover(
-                        now,
-                        "STOP",
-                        first_hazard_at=now,
-                        failsafe_reason=fault_reason,
-                    )
-                else:
-                    self.state = "WAITING_FOR_CA_READY"
-                    self.blocked_reason = (
-                        "CA_NOT_READY"
-                        if data.web_video_available
-                        else "HUD_WEB_VIDEO_UNAVAILABLE"
-                    )
+                self.state = "WAITING_FOR_CA_READY"
+                self.blocked_reason = (
+                    "CA_NOT_READY"
+                    if data.web_video_available
+                    else "HUD_WEB_VIDEO_UNAVAILABLE"
+                )
+                self._event("STARTUP_GRACE_COMPLETED", now)
 
         elif self.state == "WAITING_FOR_CA_READY":
-            fault_reason = self._failsafe_stop_reason(data)
-            if (
-                data.fcu_connected
-                and data.fcu_armed
-                and self._mode(data.fcu_mode) == "AUTO"
-                and fault_reason
-            ):
-                self._begin_takeover(
-                    now,
-                    "STOP",
-                    first_hazard_at=now,
-                    failsafe_reason=fault_reason,
+            # Persepsi dan seluruh software boleh menyala terlebih dahulu.
+            # Tidak ada mode request dan tidak ada keluaran gerak di state ini.
+            if not data.software_ready:
+                self.blocked_reason = (
+                    "HUD_WEB_VIDEO_UNAVAILABLE"
+                    if not data.web_video_available
+                    else "CA_NOT_READY"
                 )
-            elif data.software_ready:
-                self.state = "WAITING_FOR_AUTO"
-                self.blocked_reason = "WAIT_OPERATOR_AUTO"
-            elif not data.web_video_available:
-                self.blocked_reason = "HUD_WEB_VIDEO_UNAVAILABLE"
-            else:
-                self.blocked_reason = "CA_NOT_READY"
 
-        elif self.state == "WAITING_FOR_AUTO":
-            fault_reason = self._failsafe_stop_reason(data)
-            if (
+            elif data.mission_status_known and not data.mission_active:
+                self.state = "MISSION_COMPLETE"
+                self.blocked_reason = "MISSION_COMPLETE"
+                self._event("MISSION_COMPLETE", now)
+
+            elif (
                 data.fcu_connected
-                and data.fcu_armed
                 and self._mode(data.fcu_mode) == "AUTO"
-                and fault_reason
+                and data.fcu_armed
             ):
-                self._begin_takeover(
-                    now,
-                    "STOP",
-                    first_hazard_at=now,
-                    failsafe_reason=fault_reason,
-                )
-            elif not data.fcu_connected:
-                self.blocked_reason = "FCU_DISCONNECTED"
-            elif data.fcu_armed:
-                self.blocked_reason = "PREFLIGHT_REQUIRES_DISARMED"
-            elif self._mode(data.fcu_mode) == "AUTO":
-                self.state = "WAITING_FOR_OPERATOR_ARM"
-                self.blocked_reason = "WAIT_OPERATOR_ARM"
-            else:
-                self.blocked_reason = "WAIT_OPERATOR_AUTO"
+                # Sistem sudah sehat dan operator sudah menyediakan
+                # AUTO + ARMED. CA menjadi eligible untuk monitoring/takeover.
+                self.reset_cycle_state(now)
+                self.state = "AUTO_MISSION_MONITORING"
+                self.blocked_reason = ""
+                self._event("CA_READY_AUTO_MONITORING", now)
 
-        elif self.state == "WAITING_FOR_OPERATOR_ARM":
-            if self._mode(data.fcu_mode) != "AUTO":
-                self.state = "WAITING_FOR_AUTO"
-                self.blocked_reason = "WAIT_OPERATOR_AUTO"
-            elif data.fcu_armed:
-                fault_reason = self._failsafe_stop_reason(data)
-                if fault_reason:
-                    self._begin_takeover(
-                        now,
-                        "STOP",
-                        first_hazard_at=now,
-                        failsafe_reason=fault_reason,
-                    )
+            else:
+                # Software CA sudah siap, tetapi authority masih di operator.
+                if not data.fcu_connected:
+                    reason = "WAIT_FCU_CONNECTION"
+                elif self._mode(data.fcu_mode) != "AUTO":
+                    reason = "WAIT_OPERATOR_AUTO"
+                elif not data.fcu_armed:
+                    reason = "WAIT_OPERATOR_ARM"
                 else:
-                    self.state = "AUTO_MISSION_MONITORING"
-                    self.blocked_reason = ""
+                    reason = "CONTROL_STANDBY"
+
+                self._enter_operator_override(now, reason)
+                self._event(
+                    "CA_READY_CONTROL_STANDBY",
+                    now,
+                    reason=reason,
+                )
+
+        elif self.state == "OPERATOR_OVERRIDE":
+            mode = self._mode(data.fcu_mode)
+
+            # Pipeline CA tetap hidup. Yang ditahan hanya control authority.
+            if not data.software_ready:
+                self.blocked_reason = (
+                    "HUD_WEB_VIDEO_UNAVAILABLE"
+                    if not data.web_video_available
+                    else "CA_NOT_READY"
+                )
+
+            elif not data.fcu_connected:
+                self.blocked_reason = "WAIT_FCU_CONNECTION"
+
+            elif mode != "AUTO":
+                self.blocked_reason = "WAIT_OPERATOR_AUTO"
+
+            elif not data.fcu_armed:
+                self.blocked_reason = "WAIT_OPERATOR_ARM"
+
+            elif data.mission_status_known and not data.mission_active:
+                self.state = "MISSION_COMPLETE"
+                self.blocked_reason = "MISSION_COMPLETE"
+                self._event("MISSION_COMPLETE", now)
+
+            else:
+                # AUTO + ARMED + software healthy.
+                # Tidak peduli berapa kali operator sebelumnya MANUAL,
+                # DISARM, ARM ulang, atau kembali AUTO.
+                self.reset_cycle_state(now)
+                self.state = "AUTO_MISSION_MONITORING"
+                self.blocked_reason = ""
+                self._event("OPERATOR_OVERRIDE_RELEASED", now)
+                self._event("RETURNED_TO_AUTO_MONITORING", now)
 
         elif self.state == "AUTO_MISSION_MONITORING":
             fault_reason = self._failsafe_stop_reason(data)

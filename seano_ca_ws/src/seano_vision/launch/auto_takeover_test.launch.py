@@ -110,6 +110,7 @@ def generate_launch_description():
             "hardware_test_release_repetitions": "1",
             "hardware_test_hold_stop_on_failsafe": "true",
             "hardware_test_release_without_extra_neutral": "true",
+            "hardware_test_recoverable_permission_loss": "true",
             "master_enable_on_start": "true",
             "pool_turn_away_policy": "true",
             "require_actuator_path_ready": "true",

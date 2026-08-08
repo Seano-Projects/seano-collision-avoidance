@@ -78,6 +78,7 @@ class GuardedThrusterTestAdapter(Node):
             ("bounded_stop_neutral", False),
             ("hold_stop_on_failsafe", False),
             ("release_without_extra_neutral", False),
+            ("recoverable_permission_loss", False),
         )
         for name, value in defaults:
             self.declare_parameter(name, value)
@@ -123,6 +124,9 @@ class GuardedThrusterTestAdapter(Node):
             bounded_stop_neutral=bool(self._p("bounded_stop_neutral")),
             release_without_extra_neutral=bool(
                 self._p("release_without_extra_neutral")
+            ),
+            recoverable_permission_loss=bool(
+                self._p("recoverable_permission_loss")
             ),
         )
         self.hold_stop_on_failsafe = bool(
@@ -463,6 +467,16 @@ class GuardedThrusterTestAdapter(Node):
         if self.core.held and not guardian_fresh:
             self._publish_actions(self.core.abort("GUARDIAN_HEARTBEAT_STALE"))
             self.abort_reason = self.core.abort_reason
+        elif (
+            bool(self._p("recoverable_permission_loss"))
+            and (self.core.held or self.core.control_acquired)
+            and not allowed
+        ):
+            # Operator/manual authority wins immediately. Release ownership
+            # without setting a permanent adapter abort.
+            self._publish_actions(
+                self.core.relinquish(now=time.time())
+            )
         elif self.core.held and (now - self.command_t > self.limits.command_timeout_s):
             self._publish_actions(self.core.abort("SAFE_COMMAND_STALE"))
             self.abort_reason = self.core.abort_reason

@@ -211,6 +211,9 @@ def generate_launch_description():
     hardware_test_release_without_extra_neutral = LaunchConfiguration(
         "hardware_test_release_without_extra_neutral"
     )
+    hardware_test_recoverable_permission_loss = LaunchConfiguration(
+        "hardware_test_recoverable_permission_loss"
+    )
     effective_require_actuator_path_ready = _any_true(
         use_thruster_adapter_preview, require_actuator_path_ready,
         use_guarded_thruster_test_adapter, use_thruster_test_guardian
@@ -795,6 +798,10 @@ def generate_launch_description():
                 hardware_test_release_without_extra_neutral,
                 value_type=bool,
             ),
+            "recoverable_permission_loss": ParameterValue(
+                hardware_test_recoverable_permission_loss,
+                value_type=bool,
+            ),
         }],
     )
     hardware_adapter = TimerAction(period=2.0, actions=[hardware_adapter_node])
@@ -1025,6 +1032,10 @@ def generate_launch_description():
         ),
         DeclareLaunchArgument(
             "hardware_test_release_without_extra_neutral",
+            default_value="false",
+        ),
+        DeclareLaunchArgument(
+            "hardware_test_recoverable_permission_loss",
             default_value="false",
         ),
         DeclareLaunchArgument(

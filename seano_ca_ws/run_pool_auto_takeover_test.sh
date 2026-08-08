@@ -282,6 +282,7 @@ if [ "${1:-}" = "--dry-check" ]; then
   echo "No MQTT connection opened or message published"
   echo "No FCU mode request and no arm/disarm"
   echo "use_mavros=false use_rc_override_bridge=false use_mode_manager=false"
+  echo "startup_control_state=non_blocking actuation_gate=AUTO+ARMED+SOFTWARE_READY"
   echo "sole mode owner=auto_takeover_manager_node"
   echo "web_video bind=0.0.0.0 port=8080 topic=/ca/auto_takeover/debug_image"
   echo "mapping=${THRUSTER_MAPPING_PROFILE} channels steering=${STEERING_CHANNEL_INDEX} throttle=${THROTTLE_CHANNEL_INDEX} pwm=${PWM_MIN}/${NEUTRAL_THROTTLE_PWM}/${PWM_MAX}"
@@ -336,7 +337,6 @@ run_preflight_only() {
   printf '%s\n' "$services" | grep -qx '/mavros/set_mode' && service_ok=true
   if [ "$ROS_DOMAIN_ID" = "0" ] && [ "$credential_ok" = true ] &&
      validate_limits && [ "$graph_ok" = true ] &&
-     [ "$connected" = true ] && [ "$armed" = false ] &&
      [ "$rc_ok" = true ] && [ "$service_ok" = true ]; then
     ready=true
   fi
@@ -346,7 +346,8 @@ run_preflight_only() {
   echo "FCU connected: $connected"
   echo "FCU armed: $armed"
   echo "FCU mode: $mode"
-  if [ "$mode" != "AUTO" ]; then echo "Operator must select AUTO before arming."; fi
+  echo "Control state at startup is informational only."
+  echo "CA control becomes eligible only after software is ready and FCU is AUTO + ARMED."
   echo "RC publisher count: $pub_count"
   echo "RC publisher: $pub_full"
   echo "MAVROS RC subscriber: $rc_ok"

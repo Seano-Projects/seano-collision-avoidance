@@ -892,7 +892,8 @@ class AdapterCore:
     def __init__(self, limits: TestLimits | None = None, session_id: str | None = None,
                  neutral_repetitions: int = 3, release_repetitions: int = 3,
                  bounded_stop_neutral: bool = False,
-                 release_without_extra_neutral: bool = False):
+                 release_without_extra_neutral: bool = False,
+                 recoverable_permission_loss: bool = False):
         self.limits = limits or TestLimits()
         self.session_id = session_id or uuid.uuid4().hex
         self.sequence = 0
@@ -907,6 +908,9 @@ class AdapterCore:
         self.bounded_stop_neutral = bool(bounded_stop_neutral)
         self.release_without_extra_neutral = bool(
             release_without_extra_neutral
+        )
+        self.recoverable_permission_loss = bool(
+            recoverable_permission_loss
         )
         self.stop_neutral_sent = False
 
@@ -982,12 +986,32 @@ class AdapterCore:
         self.control_acquired = False
         return actions
 
+    def relinquish(self, now: float | None = None) -> list[PublishAction]:
+        """Release CA ownership without making the adapter terminal."""
+        if self.aborted or not (self.held or self.control_acquired):
+            return []
+
+        self.held = False
+        self.control_acquired = False
+        self.stop_neutral_sent = False
+        self.post_release_flush_sent = True
+
+        return [
+            self._action(
+                "RELEASE",
+                release=True,
+                now=now,
+            )
+        ]
+
     def update(self, command: str, left: float, right: float, motion_allowed: bool,
                now: float | None = None) -> list[PublishAction]:
         if self.aborted:
             return []
         if not motion_allowed:
             if self.held or self.control_acquired:
+                if self.recoverable_permission_loss:
+                    return self.relinquish(now=now)
                 return self.abort("MOTION_PERMISSION_LOST")
             if self.control_ever_acquired and not self.post_release_flush_sent:
                 self.post_release_flush_sent = True

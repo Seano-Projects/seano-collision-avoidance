@@ -15,7 +15,7 @@ risk_evaluator_node:
     startup_image_geometry_grace_s: 2.0
 
     camera_hfov_deg: 67.5
-    center_band_ratio: 0.30
+    center_band_ratio: 0.35
     bottom_danger_ratio: 0.55
     near_area_ratio: 0.010
 

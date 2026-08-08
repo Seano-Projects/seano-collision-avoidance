@@ -549,12 +549,16 @@ class AutoTakeoverManager(Node):
             and delivery_age <= self.core.command_freshness_watchdog_s
         )
         rc_count, rc_name, rc_subscriber = self._rc_graph()
+        risk_policy_valid = (
+            self.selected_command.strip().upper() != "STALE"
+        )
         software_ready = (
             command_fresh
             and perception_valid
             and failsafe_fresh
             and adapter_fresh
             and hud_fresh
+            and risk_policy_valid
             and self.mqtt_connected
             and bool(self._p("web_video_available"))
         )
@@ -570,7 +574,7 @@ class AutoTakeoverManager(Node):
             camera_perception_available=camera_perception_available,
             manager_fresh=manager_fresh,
             watchdog_fresh=failsafe_fresh,
-            risk_policy_valid=self.selected_command.strip().upper() != "STALE",
+            risk_policy_valid=risk_policy_valid,
             command_fresh=command_fresh,
             failsafe_active=self.failsafe or not failsafe_fresh,
             desired_command=self.desired_command,

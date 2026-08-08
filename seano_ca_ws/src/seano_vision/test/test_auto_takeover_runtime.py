@@ -232,12 +232,32 @@ def test_15_auto_restore_requires_takeover_owner():
     assert core.abort_reason == "AUTO_RESTORE_NOT_OWNED"
 
 
-def test_16_operator_mode_intervention_does_not_force_auto():
+def test_16_operator_mode_intervention_is_recoverable():
     core = manual_ready()
-    core.step(ready(10.0, fcu_mode="RTL", selected_command="SLOW_DOWN"))
-    assert core.abort_reason == "OPERATOR_MODE_INTERVENTION"
+
+    output = core.step(
+        ready(
+            10.0,
+            fcu_mode="RTL",
+            selected_command="SLOW_DOWN",
+        )
+    )
+
+    assert output.state == "OPERATOR_OVERRIDE"
+    assert output.abort_reason == ""
+    assert not output.motion_allowed
     assert core.consume_mode_request() == ""
 
+    recovered = core.step(
+        ready(
+            10.1,
+            fcu_mode="AUTO",
+            fcu_armed=True,
+        )
+    )
+
+    assert recovered.state == "AUTO_MISSION_MONITORING"
+    assert recovered.abort_reason == ""
 
 def test_17_restore_auto_service_failure_is_recoverable():
     core = manual_ready()
@@ -262,11 +282,33 @@ def test_17_restore_auto_service_failure_is_recoverable():
     assert core.abort_reason == ""
 
 
-def test_18_disarm_during_motion_aborts():
+def test_18_disarm_during_motion_releases_to_operator_override():
     core = manual_ready()
-    core.step(ready(10.0, fcu_mode="MANUAL", fcu_armed=False, selected_command="SLOW_DOWN"))
-    assert core.abort_reason == "FCU_DISARMED"
 
+    output = core.step(
+        ready(
+            10.0,
+            fcu_mode="MANUAL",
+            fcu_armed=False,
+            selected_command="SLOW_DOWN",
+        )
+    )
+
+    assert output.state == "OPERATOR_OVERRIDE"
+    assert output.abort_reason == ""
+    assert not output.motion_allowed
+    assert core.consume_mode_request() == ""
+
+    recovered = core.step(
+        ready(
+            10.1,
+            fcu_mode="AUTO",
+            fcu_armed=True,
+        )
+    )
+
+    assert recovered.state == "AUTO_MISSION_MONITORING"
+    assert recovered.abort_reason == ""
 
 def test_19_perception_lost_during_motion_switches_to_stop():
     core = manual_ready()
@@ -766,44 +808,78 @@ def test_52_perception_loss_in_neutral_wait_remains_fail_closed():
     assert not output.motion_allowed
 
 
-def test_53_disarm_in_neutral_wait_aborts():
+def test_53_disarm_in_neutral_wait_is_recoverable():
     core = manual_ready()
-    core.step(ready(
-        11.8,
-        fcu_mode="MANUAL",
-        selected_command="SLOW_DOWN",
-        command_delivery_fresh=False,
-        command_delivery_age_s=2.01,
-    ))
-    output = core.step(ready(
-        12.0,
-        fcu_mode="MANUAL",
-        fcu_armed=False,
-        selected_command="SLOW_DOWN",
-    ))
-    assert output.state == "ABORTED"
-    assert output.abort_reason == "FCU_DISARMED"
 
-
-def test_54_operator_mode_intervention_never_restores_auto():
-    for operator_mode in ("RTL", "HOLD", "LOITER"):
-        core = manual_ready()
-        core.step(ready(
+    core.step(
+        ready(
             11.8,
             fcu_mode="MANUAL",
             selected_command="SLOW_DOWN",
             command_delivery_fresh=False,
             command_delivery_age_s=2.01,
-        ))
-        output = core.step(ready(
+        )
+    )
+
+    output = core.step(
+        ready(
             12.0,
-            fcu_mode=operator_mode,
+            fcu_mode="MANUAL",
+            fcu_armed=False,
             selected_command="SLOW_DOWN",
-        ))
-        assert output.state == "ABORTED"
-        assert output.abort_reason == "OPERATOR_MODE_INTERVENTION"
+        )
+    )
+
+    assert output.state == "OPERATOR_OVERRIDE"
+    assert output.abort_reason == ""
+    assert not output.motion_allowed
+
+    recovered = core.step(
+        ready(
+            12.1,
+            fcu_mode="AUTO",
+            fcu_armed=True,
+        )
+    )
+
+    assert recovered.state == "AUTO_MISSION_MONITORING"
+
+def test_54_operator_modes_are_recoverable_without_forcing_auto():
+    for operator_mode in ("RTL", "HOLD", "LOITER"):
+        core = manual_ready()
+
+        core.step(
+            ready(
+                11.8,
+                fcu_mode="MANUAL",
+                selected_command="SLOW_DOWN",
+                command_delivery_fresh=False,
+                command_delivery_age_s=2.01,
+            )
+        )
+
+        output = core.step(
+            ready(
+                12.0,
+                fcu_mode=operator_mode,
+                selected_command="SLOW_DOWN",
+            )
+        )
+
+        assert output.state == "OPERATOR_OVERRIDE"
+        assert output.abort_reason == ""
         assert core.consume_mode_request() == ""
 
+        recovered = core.step(
+            ready(
+                12.1,
+                fcu_mode="AUTO",
+                fcu_armed=True,
+            )
+        )
+
+        assert recovered.state == "AUTO_MISSION_MONITORING"
+        assert recovered.abort_reason == ""
 
 def test_55_auto_request_waits_for_both_neutral_and_release():
     core = manual_ready()
@@ -1441,14 +1517,34 @@ def test_74_hazard_return_before_release_restarts_avoidance():
     assert core.consume_mode_request() == ""
 
 
-def test_75_manual_to_auto_before_release_is_operator_intervention():
+def test_75_manual_to_auto_before_release_returns_to_monitoring():
     core = manual_ready()
+
     core.step(ready(10.0, fcu_mode="MANUAL"))
     core.step(ready(12.6, fcu_mode="MANUAL"))
-    output = core.step(ready(12.7, fcu_mode="AUTO"))
-    assert output.state == "ABORTED"
-    assert output.abort_reason == "OPERATOR_MODE_INTERVENTION"
 
+    output = core.step(
+        ready(
+            12.7,
+            fcu_mode="AUTO",
+            fcu_armed=True,
+        )
+    )
+
+    assert output.state == "OPERATOR_OVERRIDE"
+    assert output.abort_reason == ""
+    assert core.consume_mode_request() == ""
+
+    recovered = core.step(
+        ready(
+            12.8,
+            fcu_mode="AUTO",
+            fcu_armed=True,
+        )
+    )
+
+    assert recovered.state == "AUTO_MISSION_MONITORING"
+    assert recovered.abort_reason == ""
 
 def test_76_neutral_confirmation_is_required_before_release():
     core = monitoring()
@@ -1933,10 +2029,11 @@ def test_94_command_and_watchdog_stale_each_request_stop_takeover():
         assert output.requested_mode == "MANUAL"
 
 
-def test_95_armed_auto_startup_fault_does_not_wait_without_takeover():
+def test_95_armed_auto_startup_fault_waits_until_ca_ready():
     core = AutoTakeoverCore(started_at=0.0)
-    output = core.step(ready(
-        8.0,
+
+    fault = dict(
+        software_ready=False,
         perception_valid=False,
         perception_state="LOST_PERCEPTION",
         camera_perception_available=False,
@@ -1944,11 +2041,52 @@ def test_95_armed_auto_startup_fault_does_not_wait_without_takeover():
         selected_command="STOP",
         safe_command="STOP",
         desired_command="STOP",
-    ))
-    assert output.state == "TAKEOVER_REQUESTED"
-    assert output.hardware_command == "STOP"
-    assert core.consume_mode_request() == "MANUAL"
+    )
 
+    # Startup grace selesai, tetapi CA belum sehat.
+    first = core.step(
+        ready(
+            8.0,
+            fcu_mode="AUTO",
+            fcu_armed=True,
+            **fault,
+        )
+    )
+
+    assert first.state == "WAITING_FOR_CA_READY"
+    assert first.abort_reason == ""
+    assert not first.motion_allowed
+    assert not first.command_publish_allowed
+    assert core.consume_mode_request() == ""
+
+    # Tetap menunggu selama software/perception belum sehat.
+    waiting = core.step(
+        ready(
+            8.1,
+            fcu_mode="AUTO",
+            fcu_armed=True,
+            **fault,
+        )
+    )
+
+    assert waiting.state == "WAITING_FOR_CA_READY"
+    assert waiting.abort_reason == ""
+    assert core.consume_mode_request() == ""
+
+    # Setelah seluruh software sehat, AUTO + ARMED langsung
+    # membuat CA eligible untuk monitoring tanpa restart.
+    recovered = core.step(
+        ready(
+            8.2,
+            fcu_mode="AUTO",
+            fcu_armed=True,
+        )
+    )
+
+    assert recovered.state == "AUTO_MISSION_MONITORING"
+    assert recovered.abort_reason == ""
+    assert not recovered.motion_allowed
+    assert core.consume_mode_request() == ""
 
 def test_96_fault_takeover_cannot_confirm_auto_before_clear_hold():
     core, _ = _failsafe_stop_active()
@@ -2360,3 +2498,307 @@ def test_115_manager_logs_restore_response_and_reads_mission_status():
     assert '"/mavros/mission/waypoints"' in manager
     assert '"/mavros/mission/reached"' in manager
     assert '"/ca/hardware_test/release_own_echo_received"' in manager
+
+
+# OPERATOR_RECOVERY_FINAL_TESTS
+
+def test_startup_control_state_does_not_block_ca_process():
+    initial_states = (
+        ("MANUAL", False),
+        ("MANUAL", True),
+        ("AUTO", False),
+        ("AUTO", True),
+        ("RTL", False),
+        ("HOLD", True),
+    )
+
+    for mode, armed in initial_states:
+        core = AutoTakeoverCore(started_at=0.0)
+
+        first = core.step(
+            ready(
+                8.0,
+                fcu_mode=mode,
+                fcu_armed=armed,
+            )
+        )
+
+        assert first.state == "WAITING_FOR_CA_READY"
+        assert first.abort_reason == ""
+        assert not first.motion_allowed
+        assert core.consume_mode_request() == ""
+
+        second = core.step(
+            ready(
+                8.1,
+                fcu_mode=mode,
+                fcu_armed=armed,
+            )
+        )
+
+        expected = (
+            "AUTO_MISSION_MONITORING"
+            if mode == "AUTO" and armed
+            else "OPERATOR_OVERRIDE"
+        )
+
+        assert second.state == expected
+        assert second.abort_reason == ""
+        assert not second.motion_allowed
+        assert core.consume_mode_request() == ""
+
+
+def test_startup_not_ready_never_requests_control():
+    initial_states = (
+        ("MANUAL", False),
+        ("MANUAL", True),
+        ("AUTO", False),
+        ("AUTO", True),
+        ("RTL", True),
+    )
+
+    for mode, armed in initial_states:
+        core = AutoTakeoverCore(started_at=0.0)
+
+        core.step(
+            ready(
+                8.0,
+                fcu_mode=mode,
+                fcu_armed=armed,
+                software_ready=False,
+            )
+        )
+
+        output = core.step(
+            ready(
+                20.0,
+                fcu_mode=mode,
+                fcu_armed=armed,
+                software_ready=False,
+            )
+        )
+
+        assert output.state == "WAITING_FOR_CA_READY"
+        assert output.abort_reason == ""
+        assert not output.motion_allowed
+        assert not output.command_publish_allowed
+        assert core.consume_mode_request() == ""
+
+
+def test_manual_disarmed_start_then_arm_auto_enables_ca():
+    core = AutoTakeoverCore(started_at=0.0)
+
+    core.step(
+        ready(
+            8.0,
+            fcu_mode="MANUAL",
+            fcu_armed=False,
+        )
+    )
+
+    standby = core.step(
+        ready(
+            8.1,
+            fcu_mode="MANUAL",
+            fcu_armed=False,
+        )
+    )
+
+    assert standby.state == "OPERATOR_OVERRIDE"
+    assert standby.blocked_reason == "WAIT_OPERATOR_AUTO"
+
+    manual_armed = core.step(
+        ready(
+            8.2,
+            fcu_mode="MANUAL",
+            fcu_armed=True,
+        )
+    )
+
+    assert manual_armed.state == "OPERATOR_OVERRIDE"
+    assert not manual_armed.motion_allowed
+
+    auto_armed = core.step(
+        ready(
+            8.3,
+            fcu_mode="AUTO",
+            fcu_armed=True,
+        )
+    )
+
+    assert auto_armed.state == "AUTO_MISSION_MONITORING"
+    assert auto_armed.abort_reason == ""
+    assert core.consume_mode_request() == ""
+
+
+def test_operator_manual_auto_recovery_is_repeatable_twenty_times():
+    core = monitoring()
+
+    for index in range(20):
+        now = 30.0 + index
+
+        manual = core.step(
+            ready(
+                now,
+                fcu_mode="MANUAL",
+                fcu_armed=True,
+            )
+        )
+
+        assert manual.state == "OPERATOR_OVERRIDE"
+        assert manual.abort_reason == ""
+        assert not manual.motion_allowed
+        assert core.consume_mode_request() == ""
+
+        auto = core.step(
+            ready(
+                now + 0.1,
+                fcu_mode="AUTO",
+                fcu_armed=True,
+            )
+        )
+
+        assert auto.state == "AUTO_MISSION_MONITORING"
+        assert auto.abort_reason == ""
+        assert core.consume_mode_request() == ""
+
+
+def test_disarm_rearm_recovery_is_repeatable_twenty_times():
+    core = monitoring()
+
+    for index in range(20):
+        now = 60.0 + index
+
+        disarmed = core.step(
+            ready(
+                now,
+                fcu_mode="AUTO",
+                fcu_armed=False,
+            )
+        )
+
+        assert disarmed.state == "OPERATOR_OVERRIDE"
+        assert disarmed.abort_reason == ""
+        assert not disarmed.motion_allowed
+
+        armed = core.step(
+            ready(
+                now + 0.1,
+                fcu_mode="AUTO",
+                fcu_armed=True,
+            )
+        )
+
+        assert armed.state == "AUTO_MISSION_MONITORING"
+        assert armed.abort_reason == ""
+
+
+def test_hazard_still_works_after_repeated_operator_overrides():
+    core = monitoring()
+
+    for index in range(10):
+        now = 100.0 + index
+
+        core.step(
+            ready(
+                now,
+                fcu_mode="MANUAL",
+                fcu_armed=True,
+            )
+        )
+
+        recovered = core.step(
+            ready(
+                now + 0.1,
+                fcu_mode="AUTO",
+                fcu_armed=True,
+            )
+        )
+
+        assert recovered.state == "AUTO_MISSION_MONITORING"
+
+    core.step(
+        ready(
+            120.0,
+            selected_command="TURN_LEFT_SLOW",
+        )
+    )
+
+    hazard = core.step(
+        ready(
+            120.5,
+            selected_command="TURN_LEFT_SLOW",
+        )
+    )
+
+    assert hazard.state == "TAKEOVER_REQUESTED"
+    assert hazard.abort_reason == ""
+    assert core.consume_mode_request() == "MANUAL"
+
+
+def test_recoverable_adapter_can_release_and_reacquire():
+    adapter = AdapterCore(
+        session_id="operator-recovery",
+        recoverable_permission_loss=True,
+    )
+
+    first = adapter.update(
+        "SLOW_DOWN",
+        0.5,
+        0.5,
+        True,
+        now=1.0,
+    )
+
+    assert [action.kind for action in first] == ["MOTION"]
+    assert adapter.control_acquired
+    assert not adapter.aborted
+
+    released = adapter.update(
+        "SLOW_DOWN",
+        0.5,
+        0.5,
+        False,
+        now=2.0,
+    )
+
+    assert [action.kind for action in released] == ["RELEASE"]
+    assert not adapter.control_acquired
+    assert not adapter.aborted
+
+    reacquired = adapter.update(
+        "SLOW_DOWN",
+        0.5,
+        0.5,
+        True,
+        now=3.0,
+    )
+
+    assert [action.kind for action in reacquired] == ["MOTION"]
+    assert adapter.control_acquired
+    assert not adapter.aborted
+
+
+def test_auto_runtime_preflight_does_not_require_auto_or_disarmed():
+    source = SCRIPT.read_text()
+
+    assert '[ "$connected" = true ] && [ "$armed" = false ]' not in source
+    assert "Operator must select AUTO before arming." not in source
+    assert "Control state at startup is informational only." in source
+    assert "actuation_gate=AUTO+ARMED+SOFTWARE_READY" in source
+
+
+def test_center_band_final_configuration_is_035():
+    config_path = (
+        PACKAGE_ROOT
+        / "config"
+        / "alfin7_hardware_light.yaml"
+    )
+
+    parsed = yaml.safe_load(config_path.read_text())
+
+    center = parsed[
+        "risk_evaluator_node"
+    ]["ros__parameters"]["center_band_ratio"]
+
+    assert float(center) == 0.35
