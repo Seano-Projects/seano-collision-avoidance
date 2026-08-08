@@ -1,144 +1,126 @@
 # SEANO Collision Avoidance ROS 2 Workspace
 
-This directory contains the active ROS 2 Humble workspace for SEANO collision-avoidance development and pool testing.
+Workspace ROS 2 Humble untuk sistem collision avoidance USV SEANO.
 
-The previous workspace README described an older direct RC-override architecture. The current pool-test procedures reuse external MAVROS and `/usv/thruster`. They do not launch another MAVROS instance or `mavros_rc_override_bridge_node`.
+## Runtime Utama KTI
 
-See the repository root `README.md` for the complete architecture, safety boundary, and operating procedures.
+Runtime utama yang digunakan pada implementasi dan pengujian adalah:
+
+    ./run_pool_auto_takeover_test.sh
+
+Alur utama sistem:
+
+    AUTO / FOLLOWING ROUTE
+            |
+            v
+    Obstacle dan risiko terdeteksi
+            |
+            v
+    AUTO -> MANUAL takeover
+            |
+            v
+    Collision avoidance aktif
+            |
+            v
+    HOLD / SLOW / TURN / STOP
+            |
+            v
+    Kondisi kembali aman
+            |
+            v
+    Release collision avoidance
+            |
+            v
+    MANUAL -> AUTO
+            |
+            v
+    Kembali mengikuti jalur misi
+
+Runtime ini menggunakan MAVROS eksternal dan jalur `/usv/thruster` yang telah tersedia pada sistem SEANO.
+
+Konfigurasi utama:
+
+    use_mavros=false
+    use_rc_override_bridge=false
+    use_mode_manager=false
+    sole mode owner=auto_takeover_manager_node
+
+HUD:
+
+    /ca/auto_takeover/debug_image
+
+Web video:
+
+    http://<JETSON_IP>:8080
+
+## Pemeriksaan Sebelum Run
+
+Dry check:
+
+    ./run_pool_auto_takeover_test.sh --dry-check
+
+Dry check tidak menjalankan node ROS, tidak membuka koneksi MQTT, dan tidak melakukan perubahan mode maupun arm/disarm FCU.
+
+## Terminal Setup
+
+    cd ~/resource_git/seano-collision-avoidance2/seano_ca_ws
+    source /opt/ros/humble/setup.bash
+    source install/setup.bash
+    export ROS_DOMAIN_ID=0
 
 ## TensorRT Model
 
-The operational entry points use the locally generated model:
+Model operasional:
 
-~~~text
-src/seano_vision/models/yolov8n.engine
-~~~
+    src/seano_vision/models/yolov8n.engine
 
-Runtime configuration:
+Konfigurasi:
 
-~~~text
-precision: FP16
-input size: 416 × 416
-batch size: 1
-~~~
+    precision: FP16
+    input size: 416 x 416
+    batch size: 1
 
-The `.engine` file is generated on the target Jetson and is not stored in Git. The tracked `yolov8n.pt` file remains the source model used to rebuild the engine.
+File TensorRT `.engine` dibuat pada NVIDIA Jetson dan tidak disimpan di Git.
 
-## Entry Points
+## Supporting Runners
 
-| Script | Current role |
-|---|---|
-| `run_pool_existing_control_path.sh` | Default safe preview baseline with no hardware output |
-| `run_pool_thruster_hardware_test.sh` | Guarded MANUAL-mode thruster test |
-| `run_pool_auto_takeover_test.sh` | Guarded AUTO-to-MANUAL takeover and AUTO restoration test |
+Runner berikut tetap dipertahankan sebagai baseline dan diagnostic tool:
 
-These profiles are mutually exclusive.
+- `run_pool_existing_control_path.sh`
+  Safe preview tanpa hardware output.
 
-## New Terminal Setup
+- `run_pool_thruster_hardware_test.sh`
+  Guarded MANUAL-mode thruster diagnostic.
 
-~~~bash
-cd ~/resource_git/seano-collision-avoidance2/seano_ca_ws
+- `run_pool_auto_takeover_test.sh`
+  Runtime utama KTI untuk AUTO takeover, collision avoidance, release, dan AUTO restoration.
 
-source /opt/ros/humble/setup.bash
-source install/setup.bash
+## Build dan Test
 
-export ROS_DOMAIN_ID=0
-~~~
+    source /opt/ros/humble/setup.bash
 
-## Safe Preview Baseline
+    colcon build --symlink-install
 
-~~~bash
-./run_pool_existing_control_path.sh
-~~~
+    python3 -m compileall -q src/seano_vision/seano_vision
 
-Fixed safety profile:
+    bash -n run_pool_existing_control_path.sh
+    bash -n run_pool_thruster_hardware_test.sh
+    bash -n run_pool_auto_takeover_test.sh
 
-~~~text
-dry_run=true
-hardware_output_enabled=false
-mqtt_publish_enabled=false
-use_mavros=false
-use_rc_override_bridge=false
-~~~
+    python3 -m pytest src/seano_vision/test -q
 
-HUD topic:
+Baseline test terakhir:
 
-~~~text
-/ca/debug_image
-~~~
-
-## Guarded Thruster Test
-
-Dry check:
-
-~~~bash
-./run_pool_thruster_hardware_test.sh --dry-check
-~~~
-
-Read-only preflight:
-
-~~~bash
-SEANO_MQTT_ENV_FILE=/absolute/path/to/system.yaml \
-./run_pool_thruster_hardware_test.sh --preflight-only
-~~~
-
-A real run requires the environment confirmations and exact operator confirmation documented in the root README.
-
-The operator performs MANUAL-mode selection and arming. This script does not call `set_mode` and does not arm or disarm the FCU.
-
-HUD topic:
-
-~~~text
-/ca/hardware_test/debug_image
-~~~
-
-## Guarded AUTO Takeover
-
-Dry check:
-
-~~~bash
-./run_pool_auto_takeover_test.sh --dry-check
-~~~
-
-Read-only preflight:
-
-~~~bash
-SEANO_MQTT_ENV_FILE=/absolute/path/to/system.yaml \
-./run_pool_auto_takeover_test.sh --preflight-only
-~~~
-
-The test requires external MAVROS, `/mavros/set_mode`, and `/usv/thruster` as the sole RC override publisher.
-
-HUD topic:
-
-~~~text
-/ca/auto_takeover/debug_image
-~~~
-
-## Build and Test
-
-~~~bash
-source /opt/ros/humble/setup.bash
-
-colcon build --symlink-install
-
-python3 -m compileall -q src/seano_vision/seano_vision
-
-bash -n run_pool_existing_control_path.sh
-bash -n run_pool_thruster_hardware_test.sh
-bash -n run_pool_auto_takeover_test.sh
-
-colcon test --packages-select seano_vision
-colcon test-result --verbose
-~~~
+    299 passed
 
 ## Safety Rules
 
-- Do not run more than one collision-avoidance profile at the same time.
-- Do not start a second publisher on `/mavros/rc/override`.
-- Keep `/usv/thruster` as the sole RC override publisher.
-- Keep operator authority, tether, and emergency stop available.
-- Keep MQTT credentials outside this repository.
-- Stop the active profile with `Ctrl+C` in its starting terminal.
-- Do not stop or modify external SEANO startup services from this workspace.
-- Use the safe preview baseline unless a guarded physical-test procedure has been explicitly approved.
+- Jalankan hanya satu collision-avoidance profile pada satu waktu.
+- Runtime utama KTI adalah `run_pool_auto_takeover_test.sh`.
+- Jangan menjalankan MAVROS kedua dari workspace ini.
+- Jangan membuat publisher RC override kedua.
+- Gunakan `/usv/thruster` sebagai jalur RC override yang telah tersedia.
+- Jangan mengubah atau menghentikan startup service eksternal SEANO.
+- Simpan credential MQTT di luar repository.
+- Operator harus tetap memiliki akses kendali manual dan emergency stop.
+- Hentikan runtime menggunakan `Ctrl+C` pada terminal yang menjalankannya.
