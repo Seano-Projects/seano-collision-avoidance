@@ -2,24 +2,80 @@
 
 # SEANO Collision Avoidance
 
-**Sistem collision avoidance berbasis visi untuk Unmanned Surface Vehicle (USV) SEANO**
+### Vision-Based Collision Avoidance for Unmanned Surface Vehicle
 
-![ROS 2](https://img.shields.io/badge/ROS%202-Humble-22314E?logo=ros&logoColor=white)
-![NVIDIA Jetson](https://img.shields.io/badge/NVIDIA-Jetson-76B900?logo=nvidia&logoColor=white)
-![Python](https://img.shields.io/badge/Python-3-3776AB?logo=python&logoColor=white)
-![YOLOv8](https://img.shields.io/badge/YOLOv8n-TensorRT-00AEEF)
-![Runtime](https://img.shields.io/badge/Runtime-AUTO%20Takeover-4C8BF5)
+Sistem persepsi dan penghindaran tabrakan untuk **USV SEANO**  
+berbasis **ROS 2**, **computer vision**, **edge AI**, dan **guarded AUTO takeover**.
+
+<br>
+
+<a href="https://docs.ros.org/en/humble/index.html">
+  <img src="https://img.shields.io/badge/ROS%202-Humble-22314E?style=for-the-badge&logo=ros&logoColor=white" alt="ROS 2 Humble">
+</a>
+<a href="https://developer.nvidia.com/embedded/jetson-modules">
+  <img src="https://img.shields.io/badge/NVIDIA-Jetson-76B900?style=for-the-badge&logo=nvidia&logoColor=white" alt="NVIDIA Jetson">
+</a>
+<a href="https://www.python.org/">
+  <img src="https://img.shields.io/badge/Python-3-3776AB?style=for-the-badge&logo=python&logoColor=white" alt="Python">
+</a>
+
+<br>
+
+<a href="https://docs.ultralytics.com/models/yolov8/">
+  <img src="https://img.shields.io/badge/YOLOv8n-Ultralytics-111F68?style=flat-square" alt="YOLOv8n">
+</a>
+<a href="https://docs.nvidia.com/deeplearning/tensorrt/latest/index.html">
+  <img src="https://img.shields.io/badge/Inference-TensorRT-76B900?style=flat-square&logo=nvidia&logoColor=white" alt="TensorRT">
+</a>
+<a href="#auto-takeover">
+  <img src="https://img.shields.io/badge/Control-AUTO%20Takeover-3B82F6?style=flat-square" alt="AUTO Takeover">
+</a>
+<a href="#status-verifikasi">
+  <img src="https://img.shields.io/badge/Tests-308%20Passed-2EA44F?style=flat-square&logo=pytest&logoColor=white" alt="308 Tests Passed">
+</a>
+
+<br><br>
+
+<a href="https://github.com/Seano-Projects/seano-collision-avoidance/commits/main">
+  <img src="https://img.shields.io/github/last-commit/Seano-Projects/seano-collision-avoidance?style=flat-square&label=Last%20Commit" alt="Last Commit">
+</a>
+<a href="https://github.com/Seano-Projects/seano-collision-avoidance">
+  <img src="https://img.shields.io/github/repo-size/Seano-Projects/seano-collision-avoidance?style=flat-square&label=Repository%20Size" alt="Repository Size">
+</a>
+
+<br><br>
+
+**[Mulai](#menjalankan-sistem)** ·
+**[Arsitektur](#arsitektur)** ·
+**[Penilaian Risiko](#penilaian-risiko)** ·
+**[AUTO Takeover](#auto-takeover)** ·
+**[HUD](#hud-dan-monitoring)** ·
+**[Struktur Repository](#struktur-repository)**
 
 </div>
 
 ---
 
-Repository ini berisi sistem *collision avoidance* USV SEANO yang berjalan pada ROS 2 Humble dan NVIDIA Jetson.
+## Tentang Sistem
 
-Sistem memanfaatkan kamera dan YOLOv8n TensorRT untuk mendeteksi objek, mengevaluasi risiko tabrakan berdasarkan informasi visual, menentukan tindakan penghindaran, dan mengintegrasikannya dengan sistem kendali SEANO melalui mekanisme *guarded AUTO takeover*.
+Repository ini berisi sistem *collision avoidance* yang dikembangkan untuk **Unmanned Surface Vehicle (USV) SEANO**.
+
+Pipeline berjalan secara onboard pada NVIDIA Jetson. Kamera digunakan sebagai sumber persepsi visual, YOLOv8n TensorRT digunakan untuk deteksi objek, dan hasil deteksi diproses menjadi parameter risiko untuk menentukan tindakan penghindaran.
+
+Runtime aktif mengintegrasikan:
+
+| | Komponen | Implementasi |
+|---|---|---|
+| 🎥 | Persepsi | Kamera 640 × 480 |
+| 🧠 | Deteksi | YOLOv8n TensorRT |
+| 📊 | Risk evaluation | Visual collision-risk assessment |
+| 🧭 | Decision | Hold, slow, turn, dan stop |
+| 🛡️ | Safety | Watchdog dan guarded control gate |
+| ⚓ | Control | AUTO takeover dengan operator authority |
+| 🖥️ | Monitoring | ROS topics, HUD, dan runtime log |
 
 > [!IMPORTANT]
-> Runtime utama yang digunakan saat ini adalah `run_ca.sh`. Dokumentasi pada README ini difokuskan pada runtime tersebut.
+> **`run_ca.sh` adalah entry point utama sistem pada konfigurasi aktif saat ini.**
 
 ## Menjalankan Sistem
 
