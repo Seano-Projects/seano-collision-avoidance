@@ -1671,6 +1671,8 @@ class RiskEvaluatorNode(Node):
 
         image_timeout_s = float(self.get_parameter("image_timeout_s").value)
         img_age = (t - self.last_img_rx_t) if (self.last_img_rx_t > 0.0) else 999.0
+        det_age = (t - self.last_det_rx_t) if (self.last_det_rx_t > 0.0) else 999.0
+        visual_age = min(img_age, det_age)
 
         vq_caution_enter = float(self.get_parameter("vq_caution_enter").value)
         vq_caution_exit = float(self.get_parameter("vq_caution_exit").value)
@@ -1689,7 +1691,7 @@ class RiskEvaluatorNode(Node):
 
         lost_trigger = False
 
-        if img_age >= image_timeout_s:
+        if visual_age >= image_timeout_s:
             lost_trigger = True
 
         if freeze_timeout and img_age >= image_timeout_s * 0.7:
@@ -1717,7 +1719,7 @@ class RiskEvaluatorNode(Node):
             if (t - self.lost_since) < lost_min_hold:
                 return
 
-            ok = (img_age < image_timeout_s) and (not freeze_timeout) and (vq >= recover_vq)
+            ok = (visual_age < image_timeout_s) and (not freeze_timeout) and (vq >= recover_vq)
             if ok:
                 if self.ok_since <= 0.0:
                     self.ok_since = t
@@ -1908,6 +1910,8 @@ class RiskEvaluatorNode(Node):
         freeze, freeze_reason, freeze_src = self._get_freeze(t)
         img_age = (t - self.last_img_rx_t) if (self.last_img_rx_t > 0.0) else 999.0
         det_age = (t - self.last_det_rx_t) if (self.last_det_rx_t > 0.0) else 999.0
+        visual_age = min(img_age, det_age)
+        visual_fresh_source = "image" if img_age <= det_age else "detections"
 
         metrics: dict = {
             "ts": t,
@@ -1934,6 +1938,8 @@ class RiskEvaluatorNode(Node):
             "freeze_source": str(freeze_src),
             "img_age_s": float(img_age),
             "det_age_s": float(det_age),
+            "visual_age_s": float(visual_age),
+            "visual_fresh_source": str(visual_fresh_source),
             "num_tracks": int(len(self.tracks)),
             "det_dt_ms": det_dt_ms,
             "avoid_mode": bool(self.avoid_mode),

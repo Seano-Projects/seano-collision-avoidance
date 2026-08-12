@@ -377,10 +377,14 @@ abort_before_runtime() {
 [ "${CA_EXCLUSIVE_TEST_WINDOW_CONFIRMED:-no}" = yes ] || abort_before_runtime "CA_EXCLUSIVE_TEST_WINDOW_CONFIRMED must be yes."
 [ "${CA_MODE_TAKEOVER_CONFIRMED:-no}" = yes ] || abort_before_runtime "CA_MODE_TAKEOVER_CONFIRMED must be yes."
 
-echo "Type exactly: TYPE: ENABLE GUARDED AUTO TAKEOVER TEST"
-IFS= read -r confirmation || abort_before_runtime "Interactive confirmation not received."
-[ "$confirmation" = "TYPE: ENABLE GUARDED AUTO TAKEOVER TEST" ] \
-  || abort_before_runtime "Interactive confirmation did not match."
+if [ "${CA_AUTO_TAKEOVER_WRAPPER_CONFIRMED:-no}" = "yes" ]; then
+  echo "[AUTO TAKEOVER] Operator confirmation already completed by run_ca.sh."
+else
+  echo "Type exactly: TYPE: ENABLE GUARDED AUTO TAKEOVER TEST"
+  IFS= read -r confirmation || abort_before_runtime "Interactive confirmation not received."
+  [ "$confirmation" = "TYPE: ENABLE GUARDED AUTO TAKEOVER TEST" ] \
+    || abort_before_runtime "Interactive confirmation did not match."
+fi
 
 run_preflight_only || abort_before_runtime "Read-only preflight failed."
 
