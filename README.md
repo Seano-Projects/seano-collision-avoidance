@@ -13,7 +13,7 @@ berbasis **ROS 2**, **computer vision**, **edge AI**, dan **guarded AUTO takeove
 
 <img src="docs/assets/seano_pet.gif"
      alt="SEANO Collision Avoidance Mascot"
-     width="300">
+     width="520">
 
 <br><br>
 
