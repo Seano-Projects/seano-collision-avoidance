@@ -9,6 +9,14 @@ berbasis **ROS 2**, **computer vision**, **edge AI**, dan **guarded AUTO takeove
 
 <br>
 
+<br>
+
+<img src="docs/assets/seano_pet.gif"
+     alt="SEANO Collision Avoidance Mascot"
+     width="300">
+
+<br><br>
+
 <a href="https://docs.ros.org/en/humble/index.html">
   <img src="https://img.shields.io/badge/ROS%202-Humble-22314E?style=for-the-badge&logo=ros&logoColor=white" alt="ROS 2 Humble">
 </a>
