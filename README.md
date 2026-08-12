@@ -27,13 +27,9 @@ berbasis **ROS 2**, **computer vision**, **edge AI**, dan **guarded AUTO takeove
 <a href="https://docs.nvidia.com/deeplearning/tensorrt/latest/index.html">
   <img src="https://img.shields.io/badge/Inference-TensorRT-76B900?style=flat-square&logo=nvidia&logoColor=white" alt="TensorRT">
 </a>
-<a href="#auto-takeover">
-  <img src="https://img.shields.io/badge/Control-AUTO%20Takeover-3B82F6?style=flat-square" alt="AUTO Takeover">
+<a href="CONTRIBUTING.md">
+  <img src="https://img.shields.io/badge/Contributions-Welcome-8A2BE2?style=flat-square" alt="Contributions Welcome">
 </a>
-<a href="#status-verifikasi">
-  <img src="https://img.shields.io/badge/Tests-308%20Passed-2EA44F?style=flat-square&logo=pytest&logoColor=white" alt="308 Tests Passed">
-</a>
-
 <br><br>
 
 <a href="https://github.com/Seano-Projects/seano-collision-avoidance/commits/main">
@@ -44,13 +40,6 @@ berbasis **ROS 2**, **computer vision**, **edge AI**, dan **guarded AUTO takeove
 </a>
 
 <br><br>
-
-**[Mulai](#menjalankan-sistem)** ·
-**[Arsitektur](#arsitektur)** ·
-**[Penilaian Risiko](#penilaian-risiko)** ·
-**[AUTO Takeover](#auto-takeover)** ·
-**[HUD](#hud-dan-monitoring)** ·
-**[Struktur Repository](#struktur-repository)**
 
 </div>
 
@@ -77,30 +66,127 @@ Runtime aktif mengintegrasikan:
 > [!IMPORTANT]
 > **`run_ca.sh` adalah entry point utama sistem pada konfigurasi aktif saat ini.**
 
-## Menjalankan Sistem
+## Instalasi
 
-Setelah Jetson dan sistem utama SEANO selesai melakukan startup:
+Repository ini dikembangkan untuk **ROS 2 Humble** dan digunakan pada **NVIDIA Jetson** sebagai komputer onboard USV SEANO.
+
+### Persyaratan
+
+Sebelum melakukan instalasi, siapkan:
+
+- Ubuntu dengan ROS 2 Humble
+- Python 3
+- Git
+- `colcon`
+- `rosdep`
+- NVIDIA Jetson untuk deployment hardware
+- TensorRT
+- PyTorch yang sesuai dengan versi JetPack dan CUDA pada Jetson
+
+Untuk menjalankan sistem pada kendaraan SEANO, interface eksternal seperti MAVROS, MQTT, dan `/usv/thruster` juga harus tersedia.
+
+### Clone Repository
+
+```bash
+git clone https://github.com/Seano-Projects/seano-collision-avoidance.git
+cd seano-collision-avoidance/seano_ca_ws
+```
+
+### Instalasi Dependensi ROS
+
+```bash
+source /opt/ros/humble/setup.bash
+
+rosdep update
+
+rosdep install \
+  --from-paths src \
+  --ignore-src \
+  -r -y
+```
+
+### Instalasi Dependensi Python
+
+```bash
+python3 -m pip install \
+  -r src/seano_vision/requirements.txt
+```
+
+> [!NOTE]
+> PyTorch pada NVIDIA Jetson sebaiknya dipasang menggunakan paket atau wheel yang sesuai dengan versi JetPack dan CUDA. Jangan mengasumsikan wheel PyTorch untuk desktop kompatibel dengan Jetson.
+
+### Build Workspace
+
+```bash
+colcon build \
+  --symlink-install \
+  --packages-select seano_vision
+
+source install/setup.bash
+```
+
+Untuk memeriksa konfigurasi tanpa menjalankan node collision avoidance:
+
+```bash
+./run_ca.sh --dry-check
+```
+
+> [!IMPORTANT]
+> Penggunaan pada kendaraan membutuhkan environment SEANO yang sesuai, termasuk konfigurasi MQTT eksternal, interface MAVROS, `/usv/thruster`, dan TensorRT engine yang kompatibel dengan Jetson target.
+
+---
+
+## Cara Penggunaan
+
+### Menjalankan Sistem
+
+Pada Jetson SEANO:
 
 ```bash
 cd ~/resource_git/seano-collision-avoidance2/seano_ca_ws
 ./run_ca.sh
 ```
 
-Launcher akan menyiapkan environment ROS 2, workspace, konfigurasi runtime, pemeriksaan keselamatan, HUD, logging, dan sistem AUTO takeover.
+`run_ca.sh` merupakan entry point utama sistem yang digunakan saat ini.
 
-Sebelum runtime aktif, operator akan diminta melakukan konfirmasi:
+Launcher akan menyiapkan:
+
+- environment ROS 2
+- `ROS_DOMAIN_ID`
+- workspace
+- konfigurasi runtime
+- pemeriksaan awal
+- HUD
+- logging
+- AUTO takeover runtime
+
+Sebelum sistem dijalankan, operator akan diminta melakukan konfirmasi:
 
 ```text
 Ketik YES untuk menjalankan CA:
 ```
 
-Masukkan:
+Jika seluruh kondisi pengujian telah diperiksa, masukkan:
 
 ```text
 YES
 ```
 
-Untuk menghentikan runtime gunakan:
+### Opsi Runtime
+
+Seluruh fungsi tetap menggunakan launcher yang sama.
+
+| Perintah | Fungsi |
+|---|---|
+| `./run_ca.sh` | Menjalankan runtime utama |
+| `./run_ca.sh --dry-check` | Memeriksa konfigurasi tanpa menjalankan ROS node |
+| `./run_ca.sh --preflight-only` | Memeriksa interface SEANO secara read-only |
+| `./run_ca.sh --rebuild` | Melakukan build ulang sebelum runtime |
+| `./run_ca.sh --verbose` | Menampilkan output ROS secara lengkap |
+
+### Menghentikan Sistem
+
+Gunakan:
 
 ```text
 Ctrl+C
@@ -491,6 +577,64 @@ NVIDIA Jetson
 ROS 2 Humble
 YOLOv8n TensorRT
 ```
+
+---
+
+## Kontribusi
+
+Kontribusi terhadap pengembangan SEANO Collision Avoidance dapat dilakukan melalui *pull request*.
+
+Alur kontribusi yang disarankan:
+
+1. *Fork* repository ini.
+2. Buat branch baru dari `main`.
+3. Lakukan perubahan dengan ruang lingkup yang jelas.
+4. Jalankan pemeriksaan dan test yang relevan.
+5. Commit perubahan dengan pesan yang deskriptif.
+6. Push branch ke repository hasil *fork*.
+7. Ajukan *pull request* ke branch `main`.
+
+Contoh membuat branch:
+
+```bash
+git checkout -b feat/nama-fitur
+```
+
+Sebelum membuat *pull request*, lakukan pemeriksaan:
+
+```bash
+cd seano_ca_ws
+
+source /opt/ros/humble/setup.bash
+
+python3 -m compileall -q \
+  src/seano_vision/seano_vision
+
+python3 -m pytest \
+  src/seano_vision/test -q
+
+./run_ca.sh --dry-check
+```
+
+Untuk perubahan yang berkaitan dengan state machine, AUTO takeover, risk evaluator, watchdog, MQTT, atau jalur aktuator, pastikan perubahan tidak menghilangkan prioritas operator dan tidak melewati mekanisme keselamatan yang sudah diterapkan.
+
+Panduan kontribusi lebih lengkap tersedia pada [`CONTRIBUTING.md`](CONTRIBUTING.md).
+
+---
+
+## Lisensi
+
+Package ROS `seano_vision` saat ini mendeklarasikan **MIT License** melalui metadata package.
+
+MIT merupakan lisensi permisif yang pada dasarnya memperbolehkan penggunaan, modifikasi, dan distribusi perangkat lunak dengan tetap mempertahankan pemberitahuan hak cipta dan lisensi yang berlaku.
+
+Perangkat lunak disediakan tanpa jaminan. Penggunaan pada kendaraan atau perangkat keras nyata tetap membutuhkan validasi, pengujian, dan pengawasan operator.
+
+Dokumen lisensi repository tingkat root belum ditambahkan karena identitas pemegang hak cipta harus ditetapkan terlebih dahulu.
+
+Informasi mengenai MIT License dapat dilihat pada:
+
+https://opensource.org/license/mit
 
 ---
 
