@@ -1,80 +1,75 @@
 # SEANO Collision Avoidance
 
-ROS 2-based collision avoidance system for the SEANO Unmanned Surface Vehicle (USV).
+Sistem *collision avoidance* berbasis visi untuk **Unmanned Surface Vehicle (USV) SEANO** yang berjalan pada ROS 2 Humble dan NVIDIA Jetson.
 
-The system combines camera-based object detection, visual collision-risk evaluation, guarded avoidance control, AUTO takeover, operator override handling, browser monitoring, and runtime logging on NVIDIA Jetson.
+Sistem menggunakan YOLOv8n TensorRT untuk mendeteksi objek dari kamera, mengolah hasil deteksi menjadi nilai risiko tabrakan, menentukan tindakan *collision avoidance*, serta menjalankan mekanisme *AUTO takeover* dengan tetap mempertahankan prioritas kendali operator.
 
-## Run
+## Menjalankan Sistem
 
-The active runtime is started from the Jetson with:
+Runtime utama yang digunakan saat ini adalah:
 
 ```bash
 cd ~/resource_git/seano-collision-avoidance2/seano_ca_ws
 ./run_ca.sh
 ```
 
-The launcher prepares the ROS environment, validates the SEANO interfaces, loads the current MQTT configuration, performs the required safety checks, and starts the complete collision avoidance runtime.
+Sebelum sistem dijalankan, launcher akan menampilkan pemeriksaan keselamatan.
 
-When prompted:
-
-```text
-Ketik YES untuk menjalankan CA:
-```
-
-enter:
+Jika seluruh kondisi pengujian sudah sesuai, ketik:
 
 ```text
 YES
 ```
 
-To stop the runtime:
+Untuk menghentikan sistem:
 
 ```text
 Ctrl+C
 ```
 
-For normal operation, `run_ca.sh` is the only entry point that needs to be used.
+`run_ca.sh` merupakan entry point utama untuk penggunaan sistem saat ini. Launcher ini menangani konfigurasi lingkungan ROS 2, workspace, MQTT, pemeriksaan awal, HUD, logging, dan runtime *AUTO takeover*.
 
 ---
 
-## System Flow
+## Arsitektur Sistem
 
-```text
-Camera
-  |
-  v
-YOLOv8n TensorRT
-  |
-  v
-Object Detection
-  |
-  v
-Risk Evaluation
-  |
-  v
-Collision Avoidance Decision
-  |
-  v
-Safety / Watchdog
-  |
-  v
-AUTO Takeover Manager
-  |
-  v
-SEANO Control System
+```mermaid
+flowchart LR
+    CAM["Kamera"] --> DET["YOLOv8n<br/>TensorRT"]
+    DET --> RISK["Evaluasi<br/>Risiko"]
+    RISK --> DEC["Keputusan<br/>Collision Avoidance"]
+    DEC --> SAFE["Safety &<br/>Watchdog"]
+    SAFE --> AUTO["AUTO Takeover<br/>Manager"]
+    AUTO --> CTRL["Sistem Kendali<br/>SEANO"]
 ```
 
-The detector provides object position and bounding-box information to the risk evaluator.
+Alur pemrosesan dibagi menjadi beberapa bagian utama.
 
-The risk evaluator derives visual collision indicators including:
+| Tahap | Fungsi |
+|---|---|
+| Kamera | Mengambil citra lingkungan secara real-time |
+| Deteksi | Mendeteksi objek menggunakan YOLOv8n TensorRT |
+| Evaluasi risiko | Mengolah posisi, ukuran, arah gerak, dan perubahan objek |
+| Pengambilan keputusan | Menentukan tindakan *collision avoidance* |
+| Safety & watchdog | Memastikan data dan jalur kontrol masih valid |
+| AUTO takeover | Mengatur pengambilalihan dan pelepasan kendali |
+| Sistem SEANO | Menjalankan perintah melalui jalur kendali kendaraan |
 
-- proximity;
-- centrality;
-- approach;
-- bearing consistency;
-- visual time-to-collision (`vTTC`).
+---
 
-The resulting risk value is converted into one of the supported commands:
+## Evaluasi Risiko
+
+Hasil deteksi objek diolah menjadi beberapa parameter visual:
+
+- *proximity*
+- *centrality*
+- *approach*
+- *bearing consistency*
+- *visual time-to-collision* (*vTTC*)
+
+Parameter tersebut digunakan untuk membentuk nilai risiko dan menentukan tindakan yang sesuai.
+
+Perintah yang dapat dihasilkan sistem:
 
 ```text
 HOLD_COURSE
@@ -86,122 +81,105 @@ TURN_RIGHT
 STOP
 ```
 
-A generated command does not automatically produce vehicle movement. The command must still pass the control and safety gates before it can be applied.
+Perintah yang dihasilkan oleh evaluator belum langsung menggerakkan kendaraan. Seluruh perintah tetap harus melewati mekanisme keselamatan dan kontrol sebelum diterapkan ke aktuator.
 
 ---
 
-## Control Behaviour
+## Mekanisme AUTO Takeover
 
-The CA process can be started without requiring a specific FCU control state.
+Sistem CA dapat dijalankan tanpa bergantung pada kondisi kontrol kendaraan saat startup.
 
-It may be started while the vehicle is:
+Runtime tetap dapat aktif ketika kendaraan berada dalam kondisi:
 
-```text
-MANUAL + DISARMED
-MANUAL + ARMED
-AUTO + DISARMED
-AUTO + ARMED
-```
+- MANUAL dan DISARMED
+- MANUAL dan ARMED
+- AUTO dan DISARMED
+- AUTO dan ARMED
 
-The perception, risk evaluation, HUD, and runtime monitoring remain active independently from vehicle control authority.
+Kamera, deteksi objek, evaluasi risiko, HUD, dan monitoring tetap dapat berjalan selama runtime aktif.
 
-Collision avoidance becomes eligible only when:
+Kendali *collision avoidance* baru dapat digunakan ketika kondisi berikut terpenuhi:
 
 ```text
 AUTO + ARMED + SOFTWARE_READY
 ```
 
-The runtime then enters:
+Pada kondisi tersebut, sistem masuk ke:
 
 ```text
 AUTO_MISSION_MONITORING
 ```
 
-When a valid hazard requires intervention, the system requests the guarded takeover path:
+Alur pengambilalihan kendali ditunjukkan pada diagram berikut.
 
-```text
-AUTO
-  |
-  v
-AUTO_MISSION_MONITORING
-  |
-  v
-Hazard confirmed
-  |
-  v
-MANUAL takeover
-  |
-  v
-Collision avoidance
-  |
-  v
-Hazard clear
-  |
-  v
-Release control
-  |
-  v
-Return to AUTO
+```mermaid
+stateDiagram-v2
+    [*] --> Monitoring: AUTO + ARMED + Ready
+
+    Monitoring: AUTO_MISSION_MONITORING
+    Takeover: TAKEOVER_REQUESTED
+    Avoidance: Collision Avoidance
+    Release: Release Control
+    Override: OPERATOR_OVERRIDE
+
+    Monitoring --> Takeover: Hazard terkonfirmasi
+    Takeover --> Avoidance: MANUAL terkonfirmasi
+    Avoidance --> Release: Kondisi kembali aman
+    Release --> Monitoring: AUTO berhasil dipulihkan
+
+    Monitoring --> Override: Operator mengambil kendali
+    Override --> Monitoring: AUTO + ARMED + Ready
 ```
 
-The system does not automatically arm or disarm the vehicle.
+Sistem tidak melakukan ARM atau DISARM secara otomatis.
 
 ---
 
-## Operator Authority
+## Prioritas Kendali Operator
 
-Operator authority always has priority.
+Operator tetap memiliki prioritas tertinggi.
 
-If the operator changes from AUTO to MANUAL or disarms the FCU, collision avoidance control is released without shutting down the CA process.
+Jika operator mengubah mode dari AUTO ke MANUAL atau melakukan DISARM, sistem CA tidak melakukan abort hanya karena intervensi tersebut.
 
-The runtime remains active and can recover when the operator later returns the vehicle to:
+Runtime tetap aktif, tetapi authority CA dilepas.
 
-```text
-AUTO + ARMED
-```
-
-provided the software and safety conditions are healthy.
-
-Typical behaviour:
+State yang digunakan untuk kondisi ini adalah:
 
 ```text
-AUTO + ARMED
-     |
-     v
-Operator selects MANUAL
-     |
-     v
 OPERATOR_OVERRIDE
-     |
-     v
-Operator returns to AUTO
-     |
-     v
-AUTO + ARMED + SOFTWARE_READY
-     |
-     v
+```
+
+Ketika operator kembali memberikan kondisi:
+
+```text
+AUTO + ARMED
+```
+
+dan seluruh komponen software kembali siap, sistem dapat masuk lagi ke:
+
+```text
 AUTO_MISSION_MONITORING
 ```
 
-This sequence can occur repeatedly during the same runtime session.
+Mekanisme ini dapat dilakukan berulang kali selama runtime yang sama tanpa perlu menjalankan ulang `run_ca.sh`.
 
 ---
 
 ## Perception
 
-Current detector configuration:
+Konfigurasi detector yang digunakan saat ini:
 
-| Parameter | Value |
-| --- | --- |
+| Parameter | Konfigurasi |
+|---|---|
 | Model | YOLOv8n |
-| Inference backend | TensorRT |
+| Backend | TensorRT |
 | Precision | FP16 |
-| Model input | 416 × 416 |
-| Camera image | 640 × 480 |
-| ROS 2 | Humble |
+| Input model | 416 × 416 |
+| Citra kamera | 640 × 480 |
 | Platform | NVIDIA Jetson |
+| ROS | ROS 2 Humble |
 
-Runtime TensorRT model:
+Model TensorRT:
 
 ```text
 seano_ca_ws/src/seano_vision/models/yolov8n.engine
@@ -213,26 +191,26 @@ Source model:
 seano_ca_ws/src/seano_vision/models/yolov8n.pt
 ```
 
-The TensorRT engine is generated for the target Jetson environment and should not be assumed portable to another GPU/CUDA/TensorRT installation.
+File `.engine` dibangun untuk lingkungan Jetson yang digunakan. Jika sistem dipindahkan ke perangkat lain, kompatibilitas TensorRT, CUDA, dan GPU harus diperiksa kembali.
 
 ---
 
-## Risk Configuration
+## Konfigurasi Risiko
 
-The active vehicle configuration is stored in:
+Konfigurasi aktif kendaraan berada di:
 
 ```text
 seano_ca_ws/src/seano_vision/config/alfin7_hardware_light.yaml
 ```
 
-Current key parameters:
+Beberapa parameter utama:
 
-| Parameter | Value |
-| --- | ---: |
+| Parameter | Nilai |
+|---|---:|
 | Camera HFOV | 67.5° |
 | CENTER band ratio | 0.35 |
-| Approx. CENTER bearing | ±11.8125° |
-| Risk evaluator minimum detection score | 0.45 |
+| Perkiraan area CENTER | ±11.8125° |
+| Minimum detection score pada evaluator | 0.45 |
 | Enter avoidance | 0.45 |
 | Exit avoidance | 0.28 |
 | Slow threshold | 0.35 |
@@ -241,15 +219,18 @@ Current key parameters:
 | Stop threshold | 0.78 |
 | Visual timeout | 1.20 s |
 
-The CENTER band represents the region directly ahead of the vessel. Objects outside this band are treated relative to their port or starboard position when an avoidance direction is selected. :contentReference[oaicite:1]{index=1}
+Area CENTER digunakan untuk mewakili area di depan kapal. Posisi objek di luar CENTER digunakan untuk membantu menentukan arah penghindaran ke sisi *port* atau *starboard*.
 
 ---
 
 ## Visual Freshness
 
-The risk evaluator monitors both direct image reception and detector-derived visual evidence.
+Evaluator memonitor dua sumber informasi visual:
 
-The following values are exposed in `/ca/metrics`:
+- penerimaan citra langsung;
+- hasil deteksi yang berasal dari frame kamera.
+
+Informasi freshness tersedia pada `/ca/metrics` melalui:
 
 ```text
 img_age_s
@@ -258,21 +239,21 @@ visual_age_s
 visual_fresh_source
 ```
 
-Effective visual freshness is determined from the freshest valid source:
+Nilai efektif menggunakan sumber visual yang paling baru:
 
 ```text
 visual_age = min(img_age, det_age)
 ```
 
-This prevents a delayed image callback from being interpreted as complete visual loss when the detector is still processing fresh frames.
+Mekanisme ini mencegah keterlambatan callback citra dianggap sebagai kehilangan persepsi ketika detector masih menerima dan memproses frame baru.
 
-If visual evidence is genuinely unavailable beyond the configured timeout, the system enters:
+Jika seluruh bukti visual melewati batas timeout, sistem masuk ke:
 
 ```text
 LOST_PERCEPTION
 ```
 
-and the safety path selects:
+dan jalur keselamatan menghasilkan:
 
 ```text
 STOP
@@ -280,53 +261,66 @@ STOP
 
 ---
 
-## External SEANO Interface
+## Integrasi dengan Sistem SEANO
 
-The collision avoidance runtime reuses the control infrastructure already running on SEANO.
-
-The current integration uses:
+Runtime collision avoidance menggunakan beberapa interface yang sudah tersedia pada sistem utama SEANO:
 
 ```text
-external MAVROS
+MAVROS
 /usv/thruster
 /mavros/set_mode
-external MQTT configuration
+MQTT
+```
+
+Konfigurasi ROS yang digunakan:
+
+```text
 ROS_DOMAIN_ID=0
 ```
 
-`run_ca.sh` does not replace the main SEANO startup system. It sources ROS 2 Humble, sets `ROS_DOMAIN_ID=0`, validates the MQTT configuration, and then starts the guarded CA runtime. :contentReference[oaicite:2]{index=2}
+Repository ini tidak menggantikan startup service utama SEANO dan tidak menjalankan MAVROS kedua.
 
-The current MQTT configuration path is:
+Jalur `/usv/thruster` tetap digunakan sebagai interface kontrol aktuator yang sudah tersedia pada sistem kendaraan.
+
+Konfigurasi MQTT pada Jetson saat ini dibaca dari:
 
 ```text
 /home/seano/Seano_ws/src/seano_startup/config/system.yaml
 ```
 
-This path is specific to the current SEANO Jetson installation.
+Path tersebut merupakan konfigurasi deployment SEANO saat ini. Jika repository digunakan pada Jetson atau kendaraan lain, path dan konfigurasi eksternal harus diperiksa kembali.
 
-When deploying to another vehicle or Jetson, review this path together with the camera, TensorRT model, vehicle geometry, and control mapping.
-
-Credentials must not be committed to this repository.
+Credential MQTT tidak boleh disimpan di repository.
 
 ---
 
-## HUD
+## HUD dan Monitoring
 
-AUTO takeover HUD topic:
+HUD utama AUTO takeover tersedia melalui topic:
 
 ```text
 /ca/auto_takeover/debug_image
 ```
 
-Browser:
+Browser dapat mengakses stream melalui:
 
 ```text
 http://<JETSON_IP>:8080/stream?topic=/ca/auto_takeover/debug_image
 ```
 
-The HUD provides the current detection result, risk, selected command, FCU state, takeover status, control gate, blocked reason, and abort reason.
+HUD menampilkan informasi utama seperti:
 
-Useful runtime topics:
+- hasil deteksi objek;
+- nilai risiko;
+- perintah yang dipilih;
+- FCU mode;
+- status ARM;
+- state AUTO takeover;
+- status control gate;
+- blocked reason;
+- abort reason.
+
+Topic monitoring utama:
 
 ```text
 /ca/auto_takeover/status_json
@@ -336,15 +330,19 @@ Useful runtime topics:
 /seano/camera/image_raw_reliable
 ```
 
-Examples:
+Contoh pengecekan status AUTO takeover:
 
 ```bash
 ros2 topic echo /ca/auto_takeover/status_json --once
 ```
 
+Monitoring risk evaluator:
+
 ```bash
 ros2 topic echo /ca/metrics
 ```
+
+Monitoring watchdog:
 
 ```bash
 ros2 topic echo /ca/watchdog_status
@@ -352,27 +350,26 @@ ros2 topic echo /ca/watchdog_status
 
 ---
 
-## Runtime Logs
+## Runtime Log
 
-Each run creates a session under:
+Setiap sesi pengujian menghasilkan folder di:
 
 ```text
 runtime_artifacts/
 ```
 
-The session contains runtime evidence such as:
+Log digunakan untuk menyimpan informasi runtime seperti:
 
-```text
-terminal output
-ROS logs
-AUTO takeover events
-control evidence
-HUD/web-video logs
-```
+- event AUTO takeover;
+- ROS log;
+- terminal log;
+- status kontrol;
+- data pendukung pengujian;
+- log HUD dan web video.
 
-The default console hides repetitive ROS telemetry and keeps important runtime events visible.
+Console default `run_ca.sh` hanya menampilkan informasi penting agar mudah dibaca operator.
 
-For full console output:
+Untuk menampilkan output ROS secara lengkap:
 
 ```bash
 ./run_ca.sh --verbose
@@ -380,9 +377,9 @@ For full console output:
 
 ---
 
-## Project Structure
+## Struktur Utama Repository
 
-The main files for the current runtime are:
+Bagian yang paling berkaitan dengan runtime saat ini:
 
 ```text
 seano_ca_ws/
@@ -405,64 +402,71 @@ seano_ca_ws/
     └── test/
 ```
 
-`auto_takeover_state.py` contains the guarded state machine used for FCU state, operator override, takeover, release, and recovery handling. The hazard command set currently includes `SLOW_DOWN`, slow/full left and right turns, and `STOP`. :contentReference[oaicite:3]{index=3}
+File utama untuk memahami logika sistem:
+
+| File | Fungsi |
+|---|---|
+| `run_ca.sh` | Entry point runtime |
+| `auto_takeover_state.py` | State machine AUTO takeover |
+| `auto_takeover_manager_node.py` | Integrasi state machine dengan runtime ROS |
+| `risk_evaluator_node.py` | Perhitungan risiko dan keputusan |
+| `detector_node.py` | Inference YOLOv8n |
+| `watchdog_failsafe_node.py` | Monitoring freshness dan failsafe |
+| `alfin7_hardware_light.yaml` | Konfigurasi aktif kendaraan |
 
 ---
 
-## Development
+## Pengembangan
 
-After modifying source code:
+Setelah melakukan perubahan pada source code, gunakan:
 
 ```bash
 cd ~/resource_git/seano-collision-avoidance2/seano_ca_ws
 ./run_ca.sh --rebuild
 ```
 
-Run the complete test suite before field testing:
+Jalankan seluruh unit test sebelum pengujian hardware:
 
 ```bash
 source /opt/ros/humble/setup.bash
 python3 -m pytest src/seano_vision/test -q
 ```
 
-Current verified baseline:
+Baseline terakhir yang telah diverifikasi:
 
 ```text
 308 passed
 ```
 
-Static runtime validation:
+Untuk pemeriksaan konfigurasi tanpa menjalankan runtime:
 
 ```bash
 ./run_ca.sh --dry-check
 ```
 
-Read-only validation against the connected SEANO system:
+Untuk memeriksa interface SEANO yang sedang aktif tanpa menjalankan node CA:
 
 ```bash
 ./run_ca.sh --preflight-only
 ```
 
-Both commands use the same active launcher and do not represent separate operational runtimes. The available launcher options are defined directly in `run_ca.sh`. :contentReference[oaicite:4]{index=4}
-
 ---
 
-## Field Testing
+## Catatan Pengujian Lapangan
 
-Before using AUTO operation, verify that the vehicle itself is ready for navigation.
+Sebelum menggunakan mode AUTO, pastikan kendaraan memenuhi kondisi operasi yang diperlukan.
 
-Check at minimum:
+Periksa:
 
-```text
-battery condition
-FCU connection
-GPS / navigation solution
-EKF state
-arming status
-operator MANUAL authority
-emergency stop availability
-```
+- baterai;
+- koneksi FCU;
+- GPS dan solusi navigasi;
+- status EKF;
+- status ARM;
+- kendali MANUAL operator;
+- emergency stop;
+- area pengujian.
 
-The collision avoidance system does not bypass autopilot-level safety or pre-arm checks.
+Sistem collision avoidance tidak menggantikan pemeriksaan keselamatan pada autopilot dan tidak melewati mekanisme *pre-arm* kendaraan.
 
-During development and field testing, keep direct operator control available at all times.
+Selama pengujian, kendali MANUAL operator harus tetap tersedia.
