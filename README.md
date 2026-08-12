@@ -1,475 +1,978 @@
 # SEANO Collision Avoidance
 
-Vision-based collision-avoidance and guarded field-test support for the SEANO Unmanned Surface Vehicle (USV).
+Vision-based collision avoidance for the SEANO Unmanned Surface Vehicle (USV), implemented as a ROS 2 Humble workspace on NVIDIA Jetson.
 
-This repository contains a ROS 2 Humble workspace for camera-based obstacle perception, collision-risk evaluation, avoidance-command generation, runtime monitoring, structured logging, guarded thruster testing, and controlled AUTO-to-MANUAL takeover experiments.
+The current system integrates camera acquisition, YOLOv8n TensorRT inference, visual collision-risk evaluation, guarded avoidance-command execution, operator-authority handling, AUTO-to-MANUAL takeover, return-to-AUTO recovery, browser-based monitoring, and structured runtime logging.
+
+> **Primary operational entry point**
+>
+> ```bash
+> cd ~/resource_git/seano-collision-avoidance2/seano_ca_ws
+> ./run_ca.sh
+> ```
+>
+> For normal operation, developers and operators should use `run_ca.sh`.
+> The lower-level runners are retained for diagnostics, validation, and compatibility testing.
 
 ![SEANO collision avoidance system overview](docs/assets/seano_ca_system_overview.png)
 
-## Current Configuration
+---
 
-| Category | Current configuration |
-|---|---|
-| Platform | NVIDIA Jetson Orin |
-| Middleware | ROS 2 Humble |
-| Perception | Camera stream and YOLOv8 detector |
-| Risk inputs | Proximity, centrality, approach, bearing consistency, and visual time-to-collision |
-| Avoidance commands | Hold course, slow down, turn port, turn starboard, and stop |
-| MAVROS | Reuses the external MAVROS instance |
-| RC override publisher | `/usv/thruster` must remain the sole publisher to `/mavros/rc/override` |
-| Repository RC bridge | Disabled in the current pool-test entry points |
-| Field-test ROS domain | `ROS_DOMAIN_ID=0` |
-| Runtime output | `runtime_artifacts/<RUN_ID>/` |
-| Default profile | Safe preview baseline with hardware output disabled |
+## 1. System Overview
 
-## TensorRT Inference
+The active SEANO collision-avoidance runtime is designed around the following control sequence:
 
-The current operational profiles use a locally generated TensorRT engine:
+```text
+Jetson / CA runtime starts
+        |
+        v
+Camera + detector + risk + watchdog + HUD become ready
+        |
+        v
+CONTROL STANDBY
+        |
+        | operator provides AUTO + ARMED
+        v
+AUTO_MISSION_MONITORING
+        |
+        | obstacle / hazard confirmed
+        v
+AUTO -> MANUAL takeover
+        |
+        v
+Collision avoidance command
+HOLD / SLOW / TURN / STOP
+        |
+        v
+Hazard clears
+        |
+        v
+Neutral / release
+        |
+        v
+MANUAL -> AUTO restoration
+        |
+        v
+AUTO_MISSION_MONITORING
+```
 
-~~~text
-yolov8n.engine
-FP16
-416 × 416
-batch 1
-~~~
+The runtime does **not** require the vehicle to be in a specific control mode when the CA process is started.
 
-The engine is generated directly on the target Jetson because TensorRT engine compatibility depends on the GPU, CUDA, and TensorRT versions.
+The perception and decision pipeline may run while the vehicle is:
 
-The tracked `yolov8n.pt` file remains the source model. The generated `yolov8n.engine` file is excluded from Git and must exist locally at:
+```text
+MANUAL + DISARMED
+MANUAL + ARMED
+AUTO   + DISARMED
+AUTO   + ARMED
+other operator-selected modes
+```
 
-~~~text
-seano_ca_ws/src/seano_vision/models/yolov8n.engine
-~~~
+Physical collision-avoidance authority is only eligible after the complete runtime is healthy and the vehicle reaches:
 
-The three operational profiles explicitly select this TensorRT engine with `imgsz=416` and FP16 inference.
+```text
+AUTO + ARMED + SOFTWARE_READY
+```
 
-## Operating Profiles
+This separation allows the operator to start the CA system, inspect the camera/HUD/detection pipeline, and only arm or select AUTO when the vehicle and test environment are ready.
 
-The profiles below are separate and must not run at the same time.
+---
 
-| Profile | Entry point | Purpose | Physical output |
-|---|---|---|---|
-| Safe preview baseline | `seano_ca_ws/run_pool_existing_control_path.sh` | Perception, risk evaluation, command preview, HUD, and logging | Disabled |
-| Guarded thruster test | `seano_ca_ws/run_pool_thruster_hardware_test.sh` | Limited MANUAL-mode physical thruster test through the existing external control path | Possible after all gates pass |
-| Guarded AUTO takeover | `seano_ca_ws/run_pool_auto_takeover_test.sh` | Controlled AUTO-to-MANUAL takeover and return-to-AUTO experiment | Possible after all gates pass |
+## 2. Primary Runtime
 
-The safe preview baseline is the default profile for development and data collection.
+The primary launcher is:
 
-The guarded hardware entry points are experimental field-test tools. They do not replace the external production arbitration contract described in `docs/THRUSTER_ARBITRATION_INTERFACE_REQUIREMENTS.md`.
+```bash
+seano_ca_ws/run_ca.sh
+```
 
-## Safety Boundary
+`run_ca.sh` is the operator-facing wrapper around the guarded AUTO-takeover runtime.
 
-The current pool-test scripts reuse systems that already operate outside this repository:
+It handles:
 
-- the existing MAVROS instance;
-- the existing `/usv/thruster` node;
-- the external vehicle-control and startup services;
-- the external MQTT infrastructure.
+- ROS 2 Humble environment setup;
+- `ROS_DOMAIN_ID=0`;
+- workspace sourcing;
+- first-time build when `install/setup.bash` does not exist;
+- MQTT configuration validation;
+- operator safety confirmation;
+- read-only preflight through the underlying AUTO-takeover runner;
+- browser HUD startup;
+- professional console filtering;
+- runtime launch;
+- safe foreground shutdown handling.
 
-The scripts do not start another MAVROS instance.
+### Normal startup
 
-The current pool-test entry points do not launch `mavros_rc_override_bridge_node`.
+After the Jetson and the external SEANO services have finished starting:
 
-This repository must not create a second publisher on `/mavros/rc/override`.
-
-Before a field run:
-
-- confirm the FCU is connected;
-- confirm the FCU is disarmed during preflight;
-- confirm `/usv/thruster` is the sole RC override publisher;
-- confirm no other collision-avoidance profile is active;
-- keep operator authority available;
-- keep the tether and emergency stop ready;
-- use an exclusive test window;
-- keep the test area clear.
-
-Stop the active profile with `Ctrl+C` in the terminal that started it.
-
-## Workspace Setup
-
-Run these commands after opening a new terminal or restarting the Jetson:
-
-~~~bash
+```bash
 cd ~/resource_git/seano-collision-avoidance2/seano_ca_ws
 
-source /opt/ros/humble/setup.bash
-source install/setup.bash
+./run_ca.sh
+```
 
-export ROS_DOMAIN_ID=0
-~~~
+The launcher displays the safety checklist and asks:
 
-The workspace is intentionally not sourced automatically from `~/.bashrc`, so it does not affect unrelated ROS workspaces.
+```text
+Ketik YES untuk menjalankan CA:
+```
 
-## Profile 1: Safe Preview Baseline
+Enter:
 
-This is the default and safest profile.
+```text
+YES
+```
 
-~~~bash
-cd ~/resource_git/seano-collision-avoidance2/seano_ca_ws
+No additional environment exports are required during normal operation on the current SEANO Jetson configuration.
 
-source /opt/ros/humble/setup.bash
-source install/setup.bash
+### Stop the runtime
 
-export ROS_DOMAIN_ID=0
+Use:
 
-./run_pool_existing_control_path.sh
-~~~
+```text
+Ctrl+C
+```
 
-The script fixes the following safety configuration:
+in the terminal that started `run_ca.sh`.
 
-~~~text
-dry_run=true
-hardware_output_enabled=false
+The CA launcher must not be terminated by killing unrelated external SEANO services.
+
+---
+
+## 3. Launcher Modes
+
+### Normal guarded runtime
+
+```bash
+./run_ca.sh
+```
+
+Starts the complete guarded AUTO-takeover collision-avoidance runtime.
+
+### Dry check
+
+```bash
+./run_ca.sh --dry-check
+```
+
+Validates the static runtime configuration without:
+
+- starting ROS nodes;
+- opening an MQTT connection;
+- publishing an MQTT command;
+- requesting an FCU mode change;
+- arming or disarming the FCU.
+
+The current dry-check policy reports:
+
+```text
+startup_control_state=non_blocking
+actuation_gate=AUTO+ARMED+SOFTWARE_READY
+```
+
+### Read-only preflight
+
+```bash
+./run_ca.sh --preflight-only
+```
+
+Checks the external runtime interface without starting the CA nodes.
+
+A valid preflight should end with:
+
+```text
+Ready for guarded AUTO takeover procedure: true
+```
+
+The FCU mode and arm state shown during preflight are informational. They are not startup blockers.
+
+### Rebuild before run
+
+```bash
+./run_ca.sh --rebuild
+```
+
+Rebuilds `seano_vision`, sources the resulting workspace, and then continues into the normal guarded runtime.
+
+Use this after changing Python nodes, launch files, configuration files, or package definitions.
+
+### Verbose console
+
+```bash
+./run_ca.sh --verbose
+```
+
+Runs the same guarded runtime but keeps the full raw ROS console output visible.
+
+The default `run_ca.sh` mode uses:
+
+```text
+scripts/ca_pretty_console.py
+```
+
+to show operator-relevant states, warnings, safety events, HUD information, and errors while suppressing repetitive telemetry.
+
+The complete raw session logs are still retained in `runtime_artifacts`.
+
+---
+
+## 4. External System Boundary
+
+The current runtime intentionally reuses infrastructure that already exists outside this repository.
+
+### External components reused by this repository
+
+- MAVROS instance started by the main SEANO system;
+- `/usv/thruster`;
+- FCU/autopilot connection;
+- `/mavros/set_mode`;
+- vehicle startup services;
+- MQTT infrastructure.
+
+### Important ownership rule
+
+`/usv/thruster` must remain the **sole publisher** to:
+
+```text
+/mavros/rc/override
+```
+
+The active AUTO-takeover profile uses:
+
+```text
 use_mavros=false
 use_rc_override_bridge=false
-mqtt_publish_enabled=false
-~~~
+use_mode_manager=false
+```
 
-It runs perception, obstacle detection, risk evaluation, avoidance-command preview, HUD output, and event logging without transmitting physical collision-avoidance commands.
+The sole FCU mode owner inside this collision-avoidance runtime is:
 
-If the FCU is in RTL, the script requires an explicit dry-run confirmation. It will not allow an armed baseline run.
+```text
+auto_takeover_manager_node
+```
 
-Default HUD topic:
+Do not start another MAVROS instance or another RC-override publisher from this repository while the external SEANO control system is active.
 
-~~~text
-/ca/debug_image
-~~~
+---
 
-Example HUD URL:
+## 5. Operator Authority
 
-~~~text
-http://<JETSON_IP>:8080/stream?topic=/ca/debug_image
-~~~
+Operator authority has priority over collision avoidance.
 
-## Profile 2: Guarded Thruster Hardware Test
+The CA process is designed to remain alive when the operator:
 
-> Warning: physical thrusters may move.
+- switches from AUTO to MANUAL;
+- disarms the vehicle;
+- arms the vehicle again;
+- selects another operator-controlled mode;
+- returns from MANUAL to AUTO.
 
-This profile is intended only for supervised first-stage pool testing.
+These actions do not require restarting `run_ca.sh`.
 
-The operator performs the MANUAL-mode selection and arm procedure. The script does not call `set_mode` and does not arm or disarm the FCU.
+When operator control interrupts CA authority, the state machine enters:
 
-### Default first-test limits
+```text
+OPERATOR_OVERRIDE
+```
 
-| Parameter | Default |
+Typical blocked reasons include:
+
+```text
+WAIT_FCU_CONNECTION
+WAIT_OPERATOR_AUTO
+WAIT_OPERATOR_ARM
+CONTROL_STANDBY
+```
+
+When the system later reaches:
+
+```text
+FCU connected
+AUTO
+ARMED
+SOFTWARE_READY
+```
+
+the CA runtime may return to:
+
+```text
+AUTO_MISSION_MONITORING
+```
+
+This recovery is designed to work repeatedly, not only once per runtime session.
+
+Safety faults in control paths that CA currently owns remain fail-closed and are not treated as ordinary operator overrides.
+
+---
+
+## 6. AUTO-Takeover Behaviour
+
+During normal mission monitoring:
+
+```text
+AUTO_MISSION_MONITORING
+```
+
+the CA pipeline continuously evaluates the selected collision-avoidance command.
+
+A persistent hazard is debounced before takeover.
+
+Current hazard commands include:
+
+```text
+SLOW_DOWN
+TURN_LEFT_SLOW
+TURN_RIGHT_SLOW
+TURN_LEFT
+TURN_RIGHT
+STOP
+```
+
+A guarded avoidance cycle conceptually follows:
+
+```text
+AUTO_MISSION_MONITORING
+        |
+        v
+hazard confirmed
+        |
+        v
+TAKEOVER_REQUESTED
+        |
+        v
+request MANUAL
+        |
+        v
+WAITING_FOR_MANUAL_CONFIRMATION
+        |
+        v
+AVOIDANCE_READY
+        |
+        v
+MOTION_COMMAND_PENDING / MOTION_ACTIVE / STOP_ACTIVE
+        |
+        v
+CLEAR_HOLD
+        |
+        v
+neutral + release
+        |
+        v
+AUTO restore
+        |
+        v
+AUTO_REJOIN_VERIFY
+        |
+        v
+AUTO_MISSION_MONITORING
+```
+
+No physical motion is permitted solely because a risk command exists.
+
+Motion remains dependent on the complete safety gate, including FCU state, command freshness, perception validity, MQTT availability, RC path validity, adapter health, foreign-command checks, and delivery evidence.
+
+---
+
+## 7. Perception and Decision Pipeline
+
+The active pipeline is:
+
+```text
+USB Camera
+    |
+    v
+camera_node
+    |
+    v
+YOLOv8n TensorRT
+detector_node
+    |
+    v
+/camera/detections
+    |
+    v
+risk_evaluator_node
+    |
+    +--> /ca/risk
+    +--> /ca/command
+    +--> /ca/mode
+    +--> /ca/metrics
+    |
+    v
+watchdog_failsafe_node
+    |
+    +--> /ca/command_safe
+    +--> /ca/failsafe_active
+    |
+    v
+command / actuator safety path
+    |
+    v
+auto_takeover_manager_node
+    |
+    v
+guarded external control path
+```
+
+The collision-risk evaluator uses five principal visual factors:
+
+1. proximity;
+2. centrality;
+3. approach;
+4. bearing consistency;
+5. visual time-to-collision (`vTTC`).
+
+The evaluator also publishes detailed features including:
+
+```text
+x_ratio
+bottom_y_ratio
+area_ratio
+bearing_deg
+bearing_rate_dps
+dlog_area_dt
+vttc_s
+```
+
+---
+
+## 8. Visual Freshness Handling
+
+Visual freshness is intentionally evaluated using both the direct image path and detector-derived visual evidence.
+
+The evaluator tracks:
+
+```text
+img_age_s
+det_age_s
+visual_age_s
+visual_fresh_source
+```
+
+The effective visual age is:
+
+```text
+visual_age = min(img_age, det_age)
+```
+
+This prevents a delayed raw-image callback from being interpreted as complete visual loss when the detector is still processing fresh frames.
+
+A true visual timeout occurs when the effective visual evidence becomes stale according to the configured timeout and other lost-perception conditions.
+
+This preserves the fail-safe behaviour:
+
+```text
+valid visual evidence
+        -> NORMAL / CAUTION
+
+visual evidence lost
+        -> LOST_PERCEPTION
+        -> failsafe STOP
+```
+
+---
+
+## 9. Active Vision Configuration
+
+The active hardware profile is:
+
+```text
+seano_ca_ws/src/seano_vision/config/alfin7_hardware_light.yaml
+```
+
+Current geometry and risk configuration:
+
+| Parameter | Current value |
 |---|---:|
-| Maximum throttle | 10% |
-| Maximum steering | 15% |
-| Maximum continuous motion | 2 seconds |
-| Startup grace period | 8 seconds |
-| Required FCU mode for motion | MANUAL |
+| Expected image | 640 × 480 |
+| Camera HFOV | 67.5° |
+| CENTER band ratio | 0.35 |
+| CENTER equivalent bearing | approximately ±11.8125° |
+| Bottom danger ratio | 0.55 |
+| Near area ratio | 0.010 |
+| Risk evaluator minimum detection score | 0.45 |
+| Enter avoidance risk | 0.45 |
+| Exit avoidance risk | 0.28 |
+| Slow threshold | 0.35 |
+| Turn-slow threshold | 0.45 |
+| Turn threshold | 0.60 |
+| Stop threshold | 0.78 |
+| vTTC turn threshold | 6.0 s |
+| vTTC stop threshold | 2.0 s |
+| Risk EMA alpha | 0.45 |
+| Track timeout | 0.60 s |
+| Detection stale timeout | 0.60 s |
+| Visual freshness timeout | 1.20 s |
 
-### Dry check
+The detector and risk evaluator use different filtering stages.
 
-~~~bash
-./run_pool_thruster_hardware_test.sh --dry-check
-~~~
+The detector runtime currently uses:
 
-The dry check starts no ROS node, opens no MQTT connection, and publishes no command.
+```text
+confidence threshold: 0.20
+IoU threshold:        0.45
+maximum detections:   50
+detector max rate:    8 FPS
+```
 
-### Read-only preflight
+The risk evaluator then applies its own minimum accepted detection score from the active hardware profile.
 
-The credential file must use an absolute path outside this repository.
+---
 
-~~~bash
-SEANO_MQTT_ENV_FILE=/absolute/path/to/system.yaml \
-./run_pool_thruster_hardware_test.sh --preflight-only
-~~~
+## 10. TensorRT Model
 
-Required result:
+The operational detector uses:
 
-~~~text
-Ready for guarded operator procedure: true
-~~~
+```text
+YOLOv8n
+TensorRT engine
+FP16
+416 × 416
+batch size 1
+```
 
-### Real guarded run
+Runtime model:
 
-Set the confirmations only after each condition has been physically verified:
+```text
+seano_ca_ws/src/seano_vision/models/yolov8n.engine
+```
 
-~~~bash
-export CA_HARDWARE_TEST_ENABLE=yes
-export CA_SHARED_MQTT_TEST_CONFIRM=yes
-export CA_TETHER_CONFIRMED=yes
-export CA_EMERGENCY_STOP_CONFIRMED=yes
-export CA_EXCLUSIVE_TEST_WINDOW_CONFIRMED=yes
-~~~
+Source model:
 
-Run:
+```text
+seano_ca_ws/src/seano_vision/models/yolov8n.pt
+```
 
-~~~bash
-SEANO_MQTT_ENV_FILE=/absolute/path/to/system.yaml \
-./run_pool_thruster_hardware_test.sh
-~~~
+The `.engine` file is generated locally on the target Jetson and is not intended to be portable between arbitrary GPU/CUDA/TensorRT environments.
 
-Enter the exact confirmation:
+A fresh Jetson deployment must therefore ensure that a compatible:
 
-~~~text
-TYPE: ENABLE GUARDED THRUSTER TEST
-~~~
+```text
+yolov8n.engine
+```
 
-Default HUD topic:
+exists before field operation.
 
-~~~text
-/ca/hardware_test/debug_image
-~~~
+---
 
-HUD availability is required before physical motion is permitted. If the HUD server is unavailable, the guarded runtime remains blocked or falls back to preview-only behavior.
+## 11. Current Guarded Motion Configuration
 
-## Profile 3: Guarded AUTO Takeover
+The AUTO-takeover runner validates the following control configuration before a real run.
 
-> Warning: this profile can request FCU mode changes and command physical movement after all safety gates pass.
+| Parameter | Current value |
+|---|---:|
+| Mapping profile | `SEAPORTAL_ACTUAL` |
+| Steering channel index | 0 |
+| Throttle channel index | 2 |
+| PWM minimum | 1000 |
+| PWM neutral | 1500 |
+| PWM maximum | 2000 |
+| Cruise reference | 100% |
+| Slow factor | 0.58 |
+| Slow throttle | 58% |
+| Minimum effective throttle | 58% |
+| Turn throttle | 0% |
+| Maximum guarded test throttle | 58% |
+| Maximum steering | 100% |
+| Maximum continuous motion window | 2.0 s |
+| Command freshness watchdog | 2.0 s |
+| Motion delivery timeout | 0.75 s |
+| Startup grace | 8.0 s |
+| Hazard debounce | 0.4 s |
+| Clear hold | 2.5 s |
+| Mode confirmation timeout | 3.0 s |
+| Mode retry interval | 1.0 s |
+| AUTO rejoin verification | 0.5 s |
+| Release timeout | 1.0 s |
+| Final release timeout | 0.5 s |
+| Maximum mode requests | 3 |
 
-This procedure tests:
+These values are guarded by runtime validation and automated tests.
 
-~~~text
-AUTO -> MANUAL takeover -> AUTO restoration
-~~~
+Do not modify physical-control limits without reviewing the control mapping, tests, safety assumptions, and field-test procedure together.
 
-It reuses the external MAVROS instance and `/usv/thruster`. It does not start MAVROS and does not launch an RC override publisher from this repository.
+---
 
-### Dry check
+## 12. MQTT Configuration
 
-~~~bash
-./run_pool_auto_takeover_test.sh --dry-check
-~~~
+MQTT credentials must remain outside this repository.
 
-The dry check starts no ROS node, opens no MQTT connection, publishes no command, and sends no FCU mode request.
+The current SEANO Jetson launcher expects:
 
-### Read-only preflight
+```text
+/home/seano/Seano_ws/src/seano_startup/config/system.yaml
+```
 
-~~~bash
-SEANO_MQTT_ENV_FILE=/absolute/path/to/system.yaml \
-./run_pool_auto_takeover_test.sh --preflight-only
-~~~
+`run_ca.sh` verifies that the file:
 
-Required result:
+- exists;
+- is readable;
+- is not a symbolic link.
 
-~~~text
-Ready for guarded AUTO takeover procedure: true
-~~~
+The secure MQTT credential loader also validates the credential source before the guarded runtime starts.
 
-Preflight checks include:
+### Important for another Jetson or developer environment
 
-- `ROS_DOMAIN_ID=0`;
-- valid MQTT credentials with TLS;
-- FCU connected and disarmed;
-- `/usv/thruster` as the sole RC override publisher;
-- MAVROS RC subscriber availability;
-- `/mavros/set_mode` availability;
-- no conflicting collision-avoidance runtime;
-- validated mapping, timing, and motion limits.
+The current MQTT configuration path is deployment-specific.
 
-The operator must select AUTO before arming.
+If the repository is moved to another Jetson or another SEANO installation, review:
 
-### Real guarded run
+```text
+seano_ca_ws/run_ca.sh
+```
 
-Set the confirmations only after each condition has been physically verified:
+and update the deployment-specific MQTT configuration path before running the vehicle.
 
-~~~bash
-export CA_AUTO_TAKEOVER_TEST_ENABLE=yes
-export CA_SHARED_MQTT_TEST_CONFIRM=yes
-export CA_TETHER_CONFIRMED=yes
-export CA_EMERGENCY_STOP_CONFIRMED=yes
-export CA_EXCLUSIVE_TEST_WINDOW_CONFIRMED=yes
-export CA_MODE_TAKEOVER_CONFIRMED=yes
-~~~
+Do not commit usernames, passwords, certificates, or private MQTT configuration files.
 
-Run:
+---
 
-~~~bash
-SEANO_MQTT_ENV_FILE=/absolute/path/to/system.yaml \
-./run_pool_auto_takeover_test.sh
-~~~
+## 13. HUD and Runtime Monitoring
 
-Enter the exact confirmation:
+Primary AUTO-takeover HUD topic:
 
-~~~text
-TYPE: ENABLE GUARDED AUTO TAKEOVER TEST
-~~~
-
-Default HUD topic:
-
-~~~text
+```text
 /ca/auto_takeover/debug_image
-~~~
+```
 
-Example HUD URL:
+Browser stream:
 
-~~~text
+```text
 http://<JETSON_IP>:8080/stream?topic=/ca/auto_takeover/debug_image
-~~~
+```
 
-## Runtime Safety States
+The AUTO-takeover HUD displays information such as:
 
-The guarded runtime uses fail-closed states to prevent motion before the complete control path is ready.
+```text
+runtime state
+FCU mode
+arming state
+desired command
+mapped command
+takeover status
+AUTO restore status
+MQTT/RC evidence
+throttle and steering request
+blocked reason
+abort reason
+```
 
-Typical states include:
+Primary status topic:
 
-- `STARTING`;
-- `WAITING_FOR_CA_READY`;
-- `WAITING_FOR_OPERATOR_ARM`;
-- `ARMED_FOR_TEST`;
-- `READY_FOR_OBSTACLE_TEST`;
-- `MOTION_ACTIVE`;
-- `PREVIEW_ONLY`;
-- `ABORTED`.
+```text
+/ca/auto_takeover/status_json
+```
 
-Motion remains blocked when required data is stale, MQTT is unavailable, the FCU state is invalid, another publisher or runtime is detected, the HUD gate fails, or another safety condition is not satisfied.
+Useful runtime inspection:
 
-## Main Runtime Components
+```bash
+ros2 topic echo /ca/auto_takeover/status_json --once
+```
 
-### Perception and decision path
+Manager publication rate:
 
-- `camera_node`
-- `detector_node`
-- `risk_evaluator_node`
-- `watchdog_failsafe_node`
-- `command_mux_node`
-- `actuator_safety_limiter_node`
-- `auto_controller_stub_node`
-- `mission_mode_manager_node`
-- `event_logger_node`
+```bash
+ros2 topic hz /ca/auto_takeover/status_json
+```
 
-### Preview path
+Risk metrics:
 
-- `thruster_adapter_preview_node`
+```bash
+ros2 topic echo /ca/metrics
+```
 
-### Guarded thruster-test path
+Watchdog status:
 
-- `guarded_thruster_test_adapter_node`
-- `thruster_test_safety_guardian_node`
-- `thruster_test_hud_node`
+```bash
+ros2 topic echo /ca/watchdog_status
+```
 
-### Guarded AUTO-takeover path
+Camera rate:
 
-- `auto_takeover_manager_node`
-- `auto_takeover_hud_node`
+```bash
+ros2 topic hz /seano/camera/image_raw_reliable
+```
 
-### Optional perception components
+Detector rate:
 
-- `vision_quality_node`
-- `false_positive_guard_node`
-- `frame_freeze_detector_node`
-- `multi_target_fusion_node`
-- `waterline_horizon_node`
+```bash
+ros2 topic hz /camera/detections
+```
 
-## Runtime Outputs
+HUD rate:
 
-Generated session data is stored under:
+```bash
+ros2 topic hz /ca/auto_takeover/debug_image
+```
 
-~~~text
-runtime_artifacts/<RUN_ID>/
-~~~
+---
 
-Depending on the selected profile, a session can contain:
+## 14. Runtime Logs
 
-~~~text
+Each real AUTO-takeover session creates:
+
+```text
+runtime_artifacts/POOL_AUTO_TAKEOVER_TEST_<TIMESTAMP>/
+```
+
+Typical contents include:
+
+```text
 terminal.log
 ros_logs/
 event_logs/
-hardware_test_logs/
 auto_takeover_logs/
 web_video_server.log
-~~~
+```
 
-The event logger can generate:
+The raw terminal log remains available even when the normal professional console hides repetitive ROS telemetry.
 
-| File | Purpose |
-|---|---|
-| `time_series.csv` | Per-sample perception, risk, command, state, and metric data |
-| `avoidance_cycles.csv` | Per-cycle timing and avoidance results |
-| `metrics_summary.csv` | Aggregated metrics in CSV format |
-| `metrics_summary.json` | Aggregated metrics in JSON format |
-| `events.csv` | Human-readable event records |
-| `events.jsonl` | JSON-lines event records |
+Use:
 
-Runtime outputs, ROS build products, caches, and local assistant directories are excluded from Git.
+```bash
+./run_ca.sh --verbose
+```
 
-## Repository Structure
+when direct raw console output is needed during debugging.
 
-~~~text
-.
+Runtime artifacts must not be committed to Git.
+
+---
+
+## 15. Build and Verification
+
+### Standard build
+
+```bash
+cd ~/resource_git/seano-collision-avoidance2/seano_ca_ws
+
+source /opt/ros/humble/setup.bash
+
+colcon build --symlink-install --packages-select seano_vision
+
+source install/setup.bash
+```
+
+### Python syntax
+
+```bash
+python3 -m compileall -q src/seano_vision/seano_vision
+```
+
+### Runner syntax
+
+```bash
+bash -n run_ca.sh
+bash -n run_pool_auto_takeover_test.sh
+bash -n run_pool_existing_control_path.sh
+bash -n run_pool_thruster_hardware_test.sh
+```
+
+### Automated tests
+
+```bash
+python3 -m pytest src/seano_vision/test -q
+```
+
+Before the current operational baseline was committed, the complete test suite passed:
+
+```text
+308 passed
+```
+
+Any change to the state machine, actuator path, mode ownership, MQTT safety, risk logic, or launch configuration should be followed by a complete test run.
+
+---
+
+## 16. Supporting Runners
+
+The following scripts remain in the repository for diagnostics and compatibility.
+
+### Primary lower-level AUTO runner
+
+```text
+run_pool_auto_takeover_test.sh
+```
+
+This is the guarded runtime used internally by:
+
+```text
+run_ca.sh
+```
+
+Normal operators should use `run_ca.sh` rather than calling this script directly.
+
+### Safe preview baseline
+
+```text
+run_pool_existing_control_path.sh
+```
+
+Used for non-hardware preview and diagnostic work.
+
+It must not be run at the same time as the primary AUTO-takeover runtime.
+
+### Guarded MANUAL thruster diagnostic
+
+```text
+run_pool_thruster_hardware_test.sh
+```
+
+Used for dedicated MANUAL-mode thruster-path diagnostics.
+
+It is not the normal collision-avoidance runtime.
+
+---
+
+## 17. Repository Structure
+
+```text
+seano-collision-avoidance/
+|
 ├── README.md
 ├── PRD.md
 ├── AGENTS.md
 ├── SKILLS.md
 ├── docs/
-│   ├── assets/
-│   ├── CLEANUP_NOTES.md
-│   ├── REPO_MAP.md
-│   ├── RUNBOOK_POOL_EXISTING_CONTROL_PATH.md
-│   └── THRUSTER_ARBITRATION_INTERFACE_REQUIREMENTS.md
+│   └── assets/
+│
 └── seano_ca_ws/
     ├── README.md
-    ├── run_pool_existing_control_path.sh
+    ├── run_ca.sh                         # PRIMARY OPERATOR ENTRY POINT
+    ├── run_pool_auto_takeover_test.sh    # underlying guarded AUTO runtime
+    ├── run_pool_existing_control_path.sh # preview / diagnostic
     ├── run_pool_thruster_hardware_test.sh
-    ├── run_pool_auto_takeover_test.sh
+    │
     ├── scripts/
+    │   ├── ca_pretty_console.py
+    │   └── summarize_tegrastats.py
+    │
     └── src/
         └── seano_vision/
             ├── config/
             ├── launch/
             ├── models/
+            ├── resource/
             ├── seano_vision/
             └── test/
-~~~
+```
 
-## Build and Verification
+Important runtime files:
 
-Build the workspace:
+```text
+seano_ca_ws/run_ca.sh
+seano_ca_ws/run_pool_auto_takeover_test.sh
 
-~~~bash
-cd seano_ca_ws
-source /opt/ros/humble/setup.bash
-colcon build --symlink-install
-~~~
+seano_ca_ws/src/seano_vision/launch/auto_takeover_test.launch.py
+seano_ca_ws/src/seano_vision/launch/phase7_cuav_usb_hardware.launch.py
 
-Check Python syntax:
+seano_ca_ws/src/seano_vision/config/alfin7_hardware_light.yaml
 
-~~~bash
-python3 -m compileall -q src/seano_vision/seano_vision
-~~~
+seano_ca_ws/src/seano_vision/seano_vision/auto_takeover_manager_node.py
+seano_ca_ws/src/seano_vision/seano_vision/auto_takeover_state.py
+seano_ca_ws/src/seano_vision/seano_vision/risk_evaluator_node.py
+seano_ca_ws/src/seano_vision/seano_vision/watchdog_failsafe_node.py
+seano_ca_ws/src/seano_vision/seano_vision/guarded_thruster_test_adapter_node.py
+```
 
-Check entry-point scripts:
+---
 
-~~~bash
-bash -n run_pool_existing_control_path.sh
-bash -n run_pool_thruster_hardware_test.sh
-bash -n run_pool_auto_takeover_test.sh
-~~~
+## 18. Development Rules
 
-Run tests:
+Changes to this repository should preserve the following invariants:
 
-~~~bash
-colcon test --packages-select seano_vision
-colcon test-result --verbose
-~~~
+1. Do not start a second MAVROS instance during the active SEANO deployment.
+2. Do not create a second publisher to `/mavros/rc/override`.
+3. `/usv/thruster` remains the external RC-override owner.
+4. Operator MANUAL authority must take priority over CA authority.
+5. DISARM must remain an operator/safety action.
+6. CA must not produce physical movement before all motion gates are valid.
+7. Real safety faults must remain fail-closed.
+8. MQTT credentials must remain outside the repository.
+9. Runtime artifacts must remain outside Git history.
+10. A full automated test run is required after safety-critical changes.
 
-All non-hardware checks must pass before a field test.
+For changes involving:
 
-## Credential Handling
+```text
+auto_takeover_state.py
+auto_takeover_manager_node.py
+guarded_thruster_test_adapter_node.py
+thruster_test_safety.py
+run_pool_auto_takeover_test.sh
+```
 
-MQTT credentials must not be committed to this repository.
+review both the nominal control path and failure/recovery behaviour before field deployment.
 
-The guarded scripts load credentials from either:
+---
 
-- an absolute YAML file outside the repository; or
-- explicit process-environment variables.
+## 19. Recommended Developer Workflow
 
-The secure credential loader rejects credential files located inside the repository, rejects symlinks, requires TLS, rejects insecure TLS configuration, and avoids printing secret values in logs.
+For a new change:
 
-## Documentation
+```text
+1. Pull latest main.
+2. Read this README and the active launch/config files.
+3. Modify only the intended repository components.
+4. Run syntax checks.
+5. Run the complete pytest suite.
+6. Run ./run_ca.sh --dry-check.
+7. Run ./run_ca.sh --preflight-only against the actual external SEANO system.
+8. Perform supervised real testing only after all checks pass.
+9. Review runtime_artifacts for evidence.
+10. Commit and push only verified changes.
+```
 
-| File | Purpose |
-|---|---|
-| `PRD.md` | Product requirements and system goals |
-| `AGENTS.md` | Repository development guidance |
-| `SKILLS.md` | Repository-specific verification procedures |
-| `docs/REPO_MAP.md` | Repository and node map |
-| `docs/RUNBOOK_POOL_EXISTING_CONTROL_PATH.md` | Baseline pool-test runbook |
-| `docs/CLEANUP_NOTES.md` | Generated-file and cleanup policy |
-| `docs/THRUSTER_ARBITRATION_INTERFACE_REQUIREMENTS.md` | Required production arbitration contract |
+Do not treat a successful unit test as a substitute for supervised hardware validation.
 
-## License
+---
 
-The ROS package metadata declares the MIT license. A repository-level `LICENSE` file has not yet been added.
+## 20. Safety Notes for Field Testing
+
+Before physical testing:
+
+- verify battery condition;
+- verify the navigation solution required by the autopilot;
+- verify FCU connectivity;
+- verify the external `/usv/thruster` path;
+- verify emergency-stop availability;
+- keep direct MANUAL operator authority available;
+- ensure only one CA runtime is active;
+- confirm the test area is clear.
+
+The collision-avoidance runtime should not be used to bypass autopilot pre-arm, GPS/EKF, battery, geofence, or other vehicle-level safety checks.
+
+Those systems remain outside the collision-avoidance repository boundary.
+
+---
+
+## 21. Current Deployment Assumptions
+
+The present operational baseline assumes:
+
+```text
+Platform     : NVIDIA Jetson Orin
+OS/ROS       : ROS 2 Humble environment
+ROS domain   : 0
+Camera       : SEANO USB camera path configured by the active hardware launch
+Detector     : YOLOv8n TensorRT
+Input        : 640 × 480
+Inference    : 416 × 416 FP16
+FCU bridge   : external MAVROS
+RC owner     : /usv/thruster
+HUD port     : 8080
+Primary run  : ./run_ca.sh
+```
+
+These are deployment assumptions, not generic defaults for every future vehicle.
+
+Developers porting this repository to another USV, FCU, camera, or Jetson should explicitly review the hardware launch, mapping, MQTT path, TensorRT engine, risk geometry, and safety limits.
+
+---
+
+## 22. License
+
+The ROS package metadata declares the MIT license.
+
+A repository-level `LICENSE` file should be added if this repository is distributed beyond the current development environment.
